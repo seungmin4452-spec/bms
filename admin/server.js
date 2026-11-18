@@ -13,6 +13,7 @@ const { execFile } = require('child_process');
 const createHarness = require('./harness');
 const createAssistant = require('./assistant');
 const createUsage = require('./usage');
+const createChat = require('./chat');
 
 const ROOT = path.resolve(__dirname, '..');
 const PUBLIC = path.join(__dirname, 'public');
@@ -27,6 +28,8 @@ const STATIC = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
+  '/theme.js': ['theme.js', 'text/javascript; charset=utf-8'],
+  '/chat-panel.js': ['chat-panel.js', 'text/javascript; charset=utf-8'],
 };
 
 if (!/^[\w-]{1,64}$/.test(TASK)) throw new Error('ADMIN_TASK 값이 올바르지 않습니다');
@@ -125,8 +128,8 @@ function getLock() {
 }
 
 const HEAD = /^(\d{4}-\d\d-\d\dT[\d:.]+Z) \| ([\w-]+) \| (\w+) \| (\S+) \| (.*)$/;
-const FIELD = /^ {2}(요약|MR|질문|메모|작업폴더): (.*)$/;
-const KEY = { 요약: 'summary', MR: 'mr', 질문: 'questions', 메모: 'notes', 작업폴더: 'dir' };
+const FIELD = /^ {2}(시작|요약|MR|질문|메모|작업폴더): (.*)$/;
+const KEY = { 시작: 'start', 요약: 'summary', MR: 'mr', 질문: 'questions', 메모: 'notes', 작업폴더: 'dir' };
 
 function loadRuns() {
   let text;
@@ -140,7 +143,7 @@ function loadRuns() {
   text.split(/\r?\n/).forEach(line => {
     const h = HEAD.exec(line);
     if (h) {
-      runs.push({ id: runs.length, time: h[1], status: h[2], mode: h[3], ticket: h[4], title: h[5], summary: '', mr: '', questions: [], notes: [], dir: '' });
+      runs.push({ id: runs.length, time: h[1], start: '', status: h[2], mode: h[3], ticket: h[4], title: h[5], summary: '', mr: '', questions: [], notes: [], dir: '' });
       return;
     }
     const f = FIELD.exec(line);
@@ -152,8 +155,8 @@ function loadRuns() {
   return runs;
 }
 
-const isDone = s => s === 'pushed' || s === 'modified';
-const listItem = r => ({ id: r.id, time: r.time, status: r.status, mode: r.mode, ticket: r.ticket, title: r.title, questionCount: r.questions.length });
+const isDone = s => s === 'pushed' || s === 'modified' || s === 'unchanged';
+const listItem = r => ({ id: r.id, time: r.time, start: r.start, status: r.status, mode: r.mode, ticket: r.ticket, title: r.title, questionCount: r.questions.length });
 
 // 작업폴더는 runs/ 안에 있을 때만 읽는다
 function runFolder(dir) {
@@ -185,6 +188,23 @@ function listShots(folder) {
     pairs.get(key)[side] = f;
   });
   return [...pairs.values()];
+}
+
+// 진행 로그(state/progress.log)에서 지금 실행의 제목과 할일 진행(TodoWrite)을 읽는다
+function readProgress() {
+  let text;
+  try { text = readTail(path.join(ROOT, 'state', 'progress.log'), 64 * 1024); } catch (e) { return null; }
+  if (!text.text) return null;
+  const lines = text.text.split(/\r?\n/);
+  const out = { title: '', done: 0, total: 0, current: '', finished: false };
+  lines.forEach(l => {
+    const head = /^\[[\d:]+\] === (.+) \((?:WEB|BATCH|MOBILE) \/ \w+\) 시작$/.exec(l);
+    if (head) Object.assign(out, { title: head[1], done: 0, total: 0, current: '', finished: false });
+    const todo = /☑ 할일 (\d+)\/(\d+)(?: — 진행중: (.*))?$/.exec(l);
+    if (todo && !/^\[[\d:]+\]\s+\[/.test(l)) Object.assign(out, { done: Number(todo[1]), total: Number(todo[2]), current: todo[3] || '' });
+    if (l.includes('=== 종료')) out.finished = true;
+  });
+  return out.title ? out : null;
 }
 
 async function getStatus() {
@@ -226,7 +246,7 @@ async function getStatus() {
   } catch (e) {
     if (e.code !== 'ENOENT') warnings.push('state.json 을 읽지 못했어요.');
   }
-  return { state, task, running: lock.alive ? { pid: lock.pid } : null, warnings, week, attention, pending, worklist, usage: usage.get() };
+  return { state, task, running: lock.alive ? { pid: lock.pid } : null, progress: lock.alive ? readProgress() : null, warnings, week, attention, pending, worklist, usage: usage.get() };
 }
 
 // ---------- HTTP ----------
@@ -303,6 +323,7 @@ function streamProgress(req, res) {
 const harness = createHarness({ ROOT, loadRuns, isDone });
 const assistant = createAssistant({ loadRuns, isDone, harness });
 const usage = createUsage({ RUNS_DIR });
+const chat = createChat({ ROOT, botRunning: () => getLock().alive });
 
 // Claude 호출은 파일을 바꾸지 않으므로 봇 실행 중에도 허용한다. 내용은 남기지 않고 호출 사실만 기록한다.
 async function askClaude(action, fn) {
@@ -399,6 +420,13 @@ async function route(req, res) {
     if (req.method === 'PUT' && hf) {
       const body = await readBody(req, harness.MAX_BYTES * 4);
       return send(res, 200, await harnessWrite(`하네스 저장 ${hf[1]}`, () => harness.saveFile(hf[1], body)));
+    }
+    // 오른쪽 대화창: 봇 폴더를 고칠 수 있는 Claude (봇 실행 중에는 읽기 전용). 응답은 이 요청에 NDJSON 으로 흘려보낸다 (내용은 기록하지 않는다)
+    if (req.method === 'POST' && p === '/api/chat') {
+      const body = await readBody(req, 16 * 1024);
+      chat.ask(req, res, body);
+      audit('Claude 대화', 'ok');
+      return;
     }
     if (req.method === 'POST' && p === '/api/usage/refresh') {
       return send(res, 200, await askClaude('Claude 사용량 확인', () => usage.refresh()));

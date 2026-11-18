@@ -14,8 +14,13 @@
   "batch": {
     "projectDirs": [
       "C:/Users/SMSHIN/IdeaProjects/PIGON_GRP_AGENT_REPL",
-      "C:/Users/SMSHIN/IdeaProjects/PIGON_GRP_AGENT_CONT"
+      "C:/Users/SMSHIN/IdeaProjects/PIGON_GRP_AGENT_CONT",
+      "C:/Users/SMSHIN/intellij/PIGON_GRP_AGENT_API"
     ],
     "promptFile": "batch-prompt.md"
+  },
+  "mobile": {
+    "projectDir": "C:/Users/SMSHIN/IdeaProjects/PigOn",
+    "promptFile": "mobile-prompt.md"
   }
 }

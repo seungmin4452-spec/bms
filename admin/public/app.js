@@ -24,35 +24,47 @@
     return data;
   }
 
+  // 토스트: popover="manual" 로 띄우고, 화면 읽기 프로그램에는 ariaNotify(없으면 숨긴 live 영역)로 알린다
+  const toastEl = document.getElementById('toast');
+  const sheet = document.getElementById('sheet');
+  let pendingToast = null; // 확인 시트가 열려 있는 동안 온 알림은 시트가 닫힌 뒤에 보여준다
   function toast(msg) {
-    const el = document.getElementById('toast');
-    el.textContent = msg;
-    el.hidden = false;
+    if (sheet.open) { pendingToast = msg; return; }
+    toastEl.textContent = msg;
+    if (!toastEl.matches(':popover-open')) toastEl.showPopover();
+    if (typeof document.ariaNotify === 'function') document.ariaNotify(msg);
+    else { const live = document.getElementById('announce'); live.textContent = ''; setTimeout(() => { live.textContent = msg; }, 50); }
     clearTimeout(toast.t);
-    toast.t = setTimeout(() => { el.hidden = true; }, 2600);
+    toast.t = setTimeout(() => { if (toastEl.matches(':popover-open')) toastEl.hidePopover(); }, 2600);
+  }
+
+  // 확인 시트: 네이티브 <dialog>. Esc · 뒤로가기 · 바깥 누르기(closedby="any")로 닫히고, 포커스는 브라우저가 돌려준다
+  let sheetResolve = null;
+  sheet.addEventListener('close', () => {
+    const ok = sheet.returnValue === 'ok';
+    sheet.returnValue = ''; // Esc 로 닫으면 값이 안 바뀌어서 이전 값이 남을 수 있다
+    const r = sheetResolve; sheetResolve = null;
+    if (r) r(ok);
+    if (pendingToast) { const m = pendingToast; pendingToast = null; toast(m); }
+  });
+  // closedby 를 모르는 브라우저(Safari)용: 누르고 뗀 곳이 모두 시트 바깥이면 닫는다
+  if (!('closedBy' in HTMLDialogElement.prototype)) {
+    const outside = e => { const r = sheet.getBoundingClientRect(); return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom; };
+    let pressedOutside = false;
+    sheet.addEventListener('pointerdown', e => { pressedOutside = outside(e); });
+    sheet.addEventListener('pointerup', e => { if (pressedOutside && outside(e)) sheet.close(); });
   }
 
   function confirmSheet(title, desc, okLabel) {
+    // 이미 열려 있던 질문은 '아니오'로 끝내고 같은 시트에 새 질문을 띄운다 (close 이벤트는 나중에 오므로 직접 끝낸다)
+    if (sheetResolve) { const r = sheetResolve; sheetResolve = null; r(false); }
     return new Promise(resolve => {
-      const sheet = document.getElementById('sheet');
-      const ok = document.getElementById('sheet-ok');
-      const cancel = document.getElementById('sheet-cancel');
       document.getElementById('sheet-title').textContent = title;
       document.getElementById('sheet-desc').textContent = desc;
-      ok.textContent = okLabel;
-      sheet.hidden = false;
-      ok.focus();
-      const close = v => {
-        sheet.hidden = true;
-        ok.onclick = cancel.onclick = sheet.onclick = null;
-        document.removeEventListener('keydown', onKey);
-        resolve(v);
-      };
-      const onKey = e => { if (e.key === 'Escape') close(false); };
-      ok.onclick = () => close(true);
-      cancel.onclick = () => close(false);
-      sheet.onclick = e => { if (e.target === sheet) close(false); };
-      document.addEventListener('keydown', onKey);
+      document.getElementById('sheet-ok').textContent = okLabel;
+      sheet.returnValue = '';
+      sheetResolve = resolve;
+      if (!sheet.open) sheet.showModal();
     });
   }
 
@@ -71,11 +83,11 @@
   }
 
   const STATUS = {
-    pushed: ['완료', 'good'], modified: ['완료', 'good'], blocked: ['확인 필요', 'warn'],
+    pushed: ['완료', 'good'], modified: ['완료', 'good'], unchanged: ['해당 없음', 'good'], blocked: ['확인 필요', 'warn'],
     failed: ['실패', 'bad'], 'no-result': ['결과 없음', ''],
   };
   const badge = s => { const [label, cls] = STATUS[s] || [s, '']; return `<span class="badge ${cls}">${esc(label)}</span>`; };
-  const modeText = m => (m === 'new' ? '신규 개발' : m === 'feedback' ? '추가요청' : m);
+  const modeText = m => (m === 'new' ? '신규 개발' : m === 'feedback' ? '추가요청' : m === 'mobile' ? '모바일 반영' : m);
 
   const runRow = r => `
     <a class="row" href="#/runs/${r.id}">
@@ -84,7 +96,7 @@
         <div class="row-title">${esc(r.title)}</div>
         <div class="row-sub">${esc(r.ticket)} · ${esc(modeText(r.mode))} · ${esc(when(r.time))}${r.questionCount ? ` · 질문 ${r.questionCount}개` : ''}</div>
       </div>
-      <span class="row-arrow" aria-hidden="true">›</span>
+      ${ICON_NEXT}
     </a>`;
 
   const workRow = w => {
@@ -107,6 +119,227 @@
     if (stream) { stream.close(); stream = null; }
   }
 
+  // ---------- 테마 (기본 다크 · 라이트 · 시스템) ----------
+  // <meta name="color-scheme"> 값이 곧 테마다. 저장값이 없으면 다크. theme.js 가 첫 화면 전에 같은 값을 넣는다.
+  const SCHEME_KEY = 'color-scheme';
+  const schemeMeta = document.querySelector('meta[name="color-scheme"]');
+  const sysDark = matchMedia('(prefers-color-scheme: dark)');
+  const savedScheme = () => { try { return localStorage.getItem(SCHEME_KEY); } catch (e) { return null; } };
+  const schemeMode = () => (schemeMeta.content === 'light' ? 'light' : schemeMeta.content === 'light dark' ? 'system' : 'dark');
+  const renderedScheme = () => { const m = schemeMode(); return m === 'system' ? (sysDark.matches ? 'dark' : 'light') : m; };
+  function setScheme(mode) { // 'dark' | 'light' | 'system'
+    const v = mode === 'light' ? 'light' : mode === 'system' ? 'light dark' : null;
+    try { if (v) localStorage.setItem(SCHEME_KEY, v); else localStorage.removeItem(SCHEME_KEY); } catch (e) { /* 저장 못 해도 화면엔 적용 */ }
+    // 테마 바꿀 때 화면 전체를 부드럽게 교차 페이드 (지원 브라우저만, 모션 줄이기면 바로 바꾼다)
+    const apply = () => { schemeMeta.content = v || 'dark'; if (location.hash === '#/settings') drawThemeCard(); };
+    if (document.startViewTransition && !reduceMotion.matches) document.startViewTransition(apply);
+    else apply();
+  }
+  // 메뉴를 누르면 펼친 패널을 접는다. 마우스가 메뉴 밖으로 나가면 다시 펼칠 수 있게 풀어 준다
+  const rail = document.getElementById('tabs');
+  rail.addEventListener('click', e => { if (e.target.closest('a')) rail.classList.add('rail-hold'); });
+  rail.addEventListener('pointerleave', () => rail.classList.remove('rail-hold'));
+  rail.addEventListener('keydown', () => rail.classList.remove('rail-hold'));
+
+  document.getElementById('theme-toggle').onclick =() => setScheme(renderedScheme() === 'dark' ? 'light' : 'dark');
+  window.addEventListener('storage', e => {
+    if (e.key !== SCHEME_KEY) return;
+    schemeMeta.content = e.newValue === 'light' || e.newValue === 'light dark' ? e.newValue : 'dark';
+    if (location.hash === '#/settings') drawThemeCard();
+  });
+  sysDark.addEventListener('change', () => { if (location.hash === '#/settings') drawThemeCard(); });
+
+  // ---------- 상태 칩 (위쪽 바) ----------
+  function setChip(state) {
+    const chip = document.getElementById('status-chip');
+    const [label] = HERO[state] || ['확인 중'];
+    chip.innerHTML = `<span class="dot ${esc(state)}"></span><span>봇 ${esc(label)}</span>`;
+  }
+  async function refreshChip() {
+    if (location.hash === '' || location.hash === '#/') return; // 홈은 refreshHome 이 같이 갱신한다
+    try { setChip((await api('GET', '/api/status')).state); } catch (e) { /* 다음에 다시 */ }
+  }
+  setInterval(refreshChip, 15000);
+
+  // ---------- 위쪽 검색: 실행 내역을 찾는다 ----------
+  document.getElementById('top-search').onsubmit = e => {
+    e.preventDefault();
+    filter.q = document.getElementById('top-q').value;
+    if (location.hash === '#/runs') runs(); else location.hash = '#/runs';
+  };
+
+  // ---------- 날짜 · 실행 집계 ----------
+  const DAY = 864e5;
+  const dayKey = d => { const x = new Date(d); return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`; };
+  const startOfDay = d => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
+  const toneOf = s => (s === 'pushed' || s === 'modified' || s === 'unchanged' ? 'good' : s === 'blocked' ? 'warn' : s === 'failed' ? 'bad' : 'none');
+  const durMs = r => (r.start ? Date.parse(r.time) - Date.parse(r.start) : null);
+  function durText(ms) {
+    if (ms == null || !(ms >= 0)) return '';
+    const m = Math.max(1, Math.round(ms / 60000));
+    return m >= 60 ? `${Math.floor(m / 60)}시간${m % 60 ? ` ${m % 60}분` : ''}` : `${m}분`;
+  }
+  // 오늘까지 n일 동안 하루별로 조건에 맞는 실행 수
+  function perDay(runsList, n, pick) {
+    const today = startOfDay(Date.now()).getTime();
+    const out = new Array(n).fill(0);
+    runsList.forEach(r => {
+      if (!pick(r)) return;
+      const i = n - 1 - Math.round((today - startOfDay(r.time).getTime()) / DAY);
+      if (i >= 0 && i < n) out[i]++;
+    });
+    return out;
+  }
+  // 최근 n주(월요일 시작) 주별 실행 수
+  function perWeek(runsList, n) {
+    const monday = startOfDay(Date.now());
+    monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+    const starts = Array.from({ length: n }, (_, i) => { const d = new Date(monday); d.setDate(d.getDate() - (n - 1 - i) * 7); return d; });
+    const counts = new Array(n).fill(0);
+    runsList.forEach(r => {
+      const t = Date.parse(r.time);
+      for (let i = n - 1; i >= 0; i--) if (t >= starts[i].getTime()) { if (i < n - 1 || t < starts[i].getTime() + 7 * DAY) counts[i]++; break; }
+    });
+    return { counts, labels: starts.map(d => `${d.getMonth() + 1}/${d.getDate()}`) };
+  }
+
+  // ---------- 차트 (SVG). 색은 CSS class 로 받아서 테마를 따라간다 ----------
+  const niceMax = v => { if (v <= 4) return 4; const p = 10 ** Math.floor(Math.log10(v)); return Math.ceil(v / p * 2) / 2 * p; };
+
+  // 차트 애니메이션 (참고 영상): 선은 왼쪽부터 그려지고, 막대·막대사탕은 아래에서 자라고, 게이지·링은 이전 값에서 채워진다.
+  // 순서용 data-i 는 playEnter 가 --i 로 옮긴다 (CSP 때문에 style 속성은 못 쓴다)
+  function sparkline(vals, label, tone = '') {
+    const max = Math.max(1, ...vals);
+    const pts = vals.map((v, i) => [vals.length > 1 ? i / (vals.length - 1) * 156 + 2 : 80, 46 - v / max * 38]);
+    const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(' ');
+    const last = pts[pts.length - 1];
+    return `<svg viewBox="0 0 160 52" role="img" aria-label="${esc(label)}">
+      <path d="${line}" pathLength="1" class="c-line ${tone}"/>
+      <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3.2" class="c-point ${tone}"/>
+    </svg>`;
+  }
+
+  function lollipop(vals, label) {
+    const max = Math.max(...vals);
+    const step = 152 / Math.max(1, vals.length - 1);
+    return `<svg viewBox="0 0 160 52" role="img" aria-label="${esc(label)}">${vals.map((v, i) => {
+      const x = (4 + i * step).toFixed(1);
+      if (!v) return `<circle cx="${x}" cy="47" r="2" class="c-zero"/>`;
+      const y = (46 - v / Math.max(1, max) * 34).toFixed(1);
+      const hi = v === max ? ' hi' : '';
+      return `<line x1="${x}" y1="48" x2="${x}" y2="${y}" class="c-stick${hi}" data-i="${i}"/><circle cx="${x}" cy="${y}" r="3.4" class="c-knob${hi}" data-i="${i}"/>`;
+    }).join('')}</svg>`;
+  }
+
+  // 비율 표시: 큰 숫자 + 가로 막대. key 가 있으면 다시 그릴 때 이전 값에서 움직인다 (applyGauges)
+  function gauge(pct, key, label, big, small, count) {
+    const p = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+    const num = count != null ? `<b data-count="${count}" data-suffix="%" data-key="${esc(key)}">${esc(big)}</b>` : `<b>${esc(big)}</b>`;
+    return `<div class="meter">
+      <div class="meter-num">${num}${small ? `<span>${esc(small)}</span>` : ''}</div>
+      <div class="meter-track" role="img" aria-label="${esc(label)} ${pct == null ? '정보 없음' : `${Math.round(p)}%`}"><i class="meter-fill c-anim" data-key="${esc(key)}" data-to="${p}"></i></div>
+    </div>`;
+  }
+
+  // data-to 를 가진 막대(비율 막대·결과 막대)를 이전 값에서 새 값으로 늘리거나 줄인다
+  const gaugeLast = {}; // key 별 마지막 값
+  function applyGauges() {
+    const arcs = view.querySelectorAll('.c-anim[data-to]');
+    if (!arcs.length) return;
+    arcs.forEach(a => { a.style.width = `${gaugeLast[a.dataset.key] || 0}%`; });
+    void arcs[0].getBoundingClientRect(); // 시작 값을 먼저 반영해야 transition 이 걸린다
+    arcs.forEach(a => {
+      const to = Number(a.dataset.to);
+      a.style.width = `${to}%`;
+      gaugeLast[a.dataset.key] = to;
+    });
+  }
+
+  // 숫자 카운트업 (참고 영상: 0% → 68%, 23.8 → 24.1). 이전 값에서 새 값까지 올라가거나 내려간다
+  const countLast = {};
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  function countUp() {
+    view.querySelectorAll('[data-count]').forEach(el => {
+      const to = Number(el.dataset.count);
+      const key = el.dataset.key;
+      const from = key in countLast ? countLast[key] : 0;
+      countLast[key] = to;
+      const suffix = el.dataset.suffix || '';
+      if (from === to || reduceMotion.matches) { el.textContent = `${to}${suffix}`; return; }
+      const t0 = performance.now();
+      const dur = 900;
+      el.textContent = `${from}${suffix}`;
+      const tick = now => {
+        if (!el.isConnected) return;
+        const k = Math.min(1, (now - t0) / dur);
+        const e = 1 - (1 - k) ** 3; // ease-out
+        el.textContent = `${Math.round(from + (to - from) * e)}${suffix}`;
+        if (k < 1) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+  }
+
+  // 결과 비율: 한 줄 누적 막대 (완료 · 확인 필요 · 실패)
+  function mixBar(parts, total) {
+    return `<div class="stack" aria-hidden="true">${total ? parts.filter(p => p.n).map(p =>
+      `<i class="sw-${p.tone} c-anim" data-key="mix-${p.tone}" data-to="${(p.n / total * 100).toFixed(1)}"></i>`).join('') : ''}</div>`;
+  }
+
+  // 주별 막대 (참고: Harvest Forecast) — 이번 주만 강조색, 마우스를 올리면 그 막대가 강조색으로 바뀌고 값 말풍선이 뜬다
+  function bars(vals, labels, label) {
+    const W = 340, H = 180, L = 26, B = 22, T = 6;
+    const max = niceMax(Math.max(1, ...vals));
+    const slot = (W - L) / vals.length;
+    const bw = Math.min(16, slot * 0.46);
+    const y = v => T + (H - T - B) * (1 - v / max);
+    const grid = [0, max / 2, max].map(v => `<text x="${L - 8}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end" class="c-axis">${Math.round(v * 10) / 10}</text>`).join('');
+    const body = vals.map((v, i) => {
+      const x = L + slot * i + (slot - bw) / 2;
+      const cur = i === vals.length - 1;
+      const top = y(v);
+      const h = Math.max(bw, H - B - top);
+      const tip = `${labels[i]}주 · ${v}건`;
+      const tw = tip.length * 5.6 + 14;
+      const tx = Math.min(W - tw, Math.max(0, x + bw / 2 - tw / 2));
+      const ty = Math.max(0, (v ? H - B - h : H - B) - 28);
+      const rect = cls => `<rect x="${x.toFixed(1)}" y="${(H - B - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="${(bw / 2).toFixed(1)}" class="${cls}" data-i="${i}"`;
+      return `<g class="bar-g${cur ? ' cur' : ''}">
+        <rect x="${(L + slot * i).toFixed(1)}" y="0" width="${slot.toFixed(1)}" height="${H - B}" class="c-hit"/>
+        <rect x="${x.toFixed(1)}" y="${T}" width="${bw.toFixed(1)}" height="${(H - B - T).toFixed(1)}" rx="${(bw / 2).toFixed(1)}" class="c-bar-bg"/>
+        ${v ? `${rect('c-bar-v')}/>${rect('c-bar-v c-bar-hi')}/>` : ''}
+        ${(vals.length - 1 - i) % 2 === 0 ? `<text x="${(x + bw / 2).toFixed(1)}" y="${H - 6}" text-anchor="middle" class="c-axis">${esc(labels[i])}</text>` : ''}
+        <g class="c-tip"><rect x="${tx.toFixed(1)}" y="${ty.toFixed(1)}" width="${tw.toFixed(1)}" height="20" rx="10"/><text x="${(tx + tw / 2).toFixed(1)}" y="${(ty + 13.5).toFixed(1)}" text-anchor="middle">${esc(tip)}</text></g>
+      </g>`;
+    }).join('');
+    return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">${grid}${body}</svg>`;
+  }
+
+  // 화면에 처음 들어올 때만 카드·목록·차트가 차례로 들어온다 (5초 갱신 때는 다시 하지 않는다)
+  let pendingEnter = false;
+  function playEnter() {
+    view.querySelectorAll('[data-i]').forEach(el => el.style.setProperty('--i', el.dataset.i));
+    if (!pendingEnter) return;
+    pendingEnter = false;
+    // 화면 위치 순서(위→아래, 왼→오)로 번호를 매긴다. HTML 순서대로면 오른쪽 위 카드가 왼쪽 아래보다 늦게 떠서 어색하다
+    const blocks = [...view.querySelectorAll('.card, .filters, .back')].map(el => ({ el, r: el.getBoundingClientRect() }));
+    blocks.sort((a, b) => (Math.round(a.r.top / 60) - Math.round(b.r.top / 60)) || (a.r.left - b.r.left));
+    blocks.forEach((b, n) => b.el.style.setProperty('--i', Math.min(n, 8)));
+    view.querySelectorAll('.scroll-list, #list, .pins').forEach(list => {
+      [...list.children].forEach((el, i) => el.style.setProperty('--j', Math.min(i, 10)));
+    });
+    view.querySelectorAll('.tl').forEach(tl => tl.querySelectorAll('.tl-bar').forEach((el, i) => el.style.setProperty('--j', Math.min(i, 16))));
+    view.classList.add('enter');
+    clearTimeout(playEnter.t);
+    playEnter.t = setTimeout(() => view.classList.remove('enter'), 2400);
+  }
+
+  const ICON_OUT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 16 16 8M9 8h7v7"/></svg>';
+  const ICON_NEXT = '<svg class="row-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m10 6 6 6-6 6"/></svg>';
+  const ICON_BACK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>';
+  // 아바타 글자: 티켓 번호 끝 두 자리 (R-2026-0113 → 13)
+  const initials = s => (String(s || '').replace(/[^A-Za-z0-9가-힣]/g, '').slice(-2).toUpperCase() || '?');
+
   // ---------- 홈 ----------
   const HERO = {
     running: ['동작 중', '일감을 처리하고 있어요'],
@@ -122,105 +355,214 @@
     return `다음 확인 ${when(t.nextRun)} · ${t.intervalMinutes}분마다`;
   }
 
-  function drawHome(s) {
+  function drawHome(s, runList) {
     const [label, title] = HERO[s.state];
     const on = s.task.enabled;
+    setChip(s.state);
+    const all = runList || [];
+    const isDoneRun = r => toneOf(r.status) === 'good';
+    const today = perDay(all, 1, isDoneRun)[0];
+    const done14 = perDay(all, 14, isDoneRun);
+    const blocked7 = perDay(all, 7, r => r.status === 'blocked');
+    const failed14 = perDay(all, 14, r => toneOf(r.status) === 'bad' || r.status === 'no-result');
+    const since30 = Date.now() - 30 * DAY;
+    const last30 = all.filter(r => Date.parse(r.time) >= since30);
+    const done30 = last30.filter(isDoneRun).length;
+    const rate = last30.length ? Math.round(done30 / last30.length * 100) : null;
+    const parts = [
+      { name: '완료', tone: 'good', n: done30 },
+      { name: '확인 필요', tone: 'warn', n: last30.filter(r => r.status === 'blocked').length },
+      { name: '실패', tone: 'bad', n: last30.filter(r => toneOf(r.status) === 'bad' || r.status === 'no-result').length },
+    ];
+    const weeks = perWeek(all, 12);
+    const work = s.worklist || [];
+    const pinOf = w => {
+      const tone = w.queued ? '' : w.hold === 'blocked' ? 'warn' : w.hold ? 'bad' : toneOf(w.lastStatus);
+      const state = w.queued ? '대기열' : w.hold === 'blocked' ? '답변 대기' : w.hold ? '재시도 중단' : w.lastStatus ? STATUS[w.lastStatus] ? STATUS[w.lastStatus][0] : w.lastStatus : '미실행';
+      return `<span class="pin ${w.queued ? 'hot' : ''}"><span class="dot ${tone}"></span>${esc(w.releaseId || `No ${w.no}`)}<span class="pin-sub">· ${esc(state)}</span></span>`;
+    };
+
     view.innerHTML = `
-      <section class="card">
-        <div class="hero">
-          <div>
+      <div class="bento home">
+        <!-- 1줄: 지금 상태 + 진행 중/마지막 실행 -->
+        <section class="card hero-panel h-hero">
+          <div class="hero">
             <div class="hero-state"><span class="dot ${s.state}"></span>${esc(label)}</div>
-            <div class="hero-title">${esc(title)}</div>
-            <div class="hero-sub">${esc(heroSub(s))}</div>
+            <button class="toggle" id="toggle" role="switch" aria-checked="${on}" aria-label="봇 켜기·끄기"></button>
           </div>
-          <button class="toggle" id="toggle" role="switch" aria-checked="${on}" aria-label="봇 켜기·끄기"></button>
-        </div>
-        ${s.warnings.map(w => `<div class="notice">${esc(w)}</div>`).join('')}
-        <div class="hero-actions">
-          <button class="btn soft" id="run" ${on && s.state !== 'running' ? '' : 'disabled'}>지금 실행</button>
-        </div>
-      </section>
-      <div class="stats">
-        <div class="stat"><b>${s.week.done}</b><span>최근 7일 완료</span></div>
-        <div class="stat"><b>${s.week.blocked}</b><span>확인 필요</span></div>
-        <div class="stat"><b>${s.week.failed}</b><span>실패</span></div>
-      </div>
-      ${usageCard(s.usage)}
-      ${s.state === 'running' ? '<section class="card"><h2>진행 로그</h2><pre class="log" id="progress"></pre></section>' : ''}
-      <section class="card flush">
-        <h2>확인이 필요한 일감</h2>
-        ${s.attention.length ? s.attention.map(runRow).join('') : '<div class="empty">지금은 확인할 일감이 없어요</div>'}
-      </section>
-      ${s.pending ? `<p class="desc pending">대기열에 ${s.pending}건이 남아 있어요.</p>` : ''}
-      <section class="card flush">
-        <h2>작업 목록 <span class="desc">매 회차 시트에서 P열 O · S열 X 인지 다시 확인해요</span></h2>
-        ${(s.worklist || []).length ? s.worklist.map(workRow).join('') : '<div class="empty">아직 알림으로 들어온 일감이 없어요</div>'}
-      </section>`;
+          <div class="hero-title">${esc(title)}</div>
+          <div class="hero-sub">${esc(heroSub(s))}</div>
+          ${s.warnings.map(w => `<div class="notice">${esc(w)}</div>`).join('')}
+          <div class="hero-actions">
+            <button class="btn main" id="run" ${on && s.state !== 'running' ? '' : 'disabled'}>지금 실행</button>
+            <a class="btn sub link" href="#/runs">실행 내역</a>
+          </div>
+          <div class="hero-foot">
+            <div class="foot-label">작업 목록 ${work.length}건${s.pending ? ` · 대기열 ${s.pending}건` : ''}</div>
+            ${work.length ? `<div class="pins">${work.slice(0, 8).map(pinOf).join('')}${work.length > 8 ? `<span class="pin"><span class="pin-sub">외 ${work.length - 8}건</span></span>` : ''}</div>`
+              : '<p class="desc mt8">아직 알림으로 들어온 일감이 없어요</p>'}
+          </div>
+        </section>
+        <section class="card h-now" id="order-card">${orderCard(s, all)}</section>
+        ${s.state === 'running' ? '<section class="card h-full"><h2>진행 로그</h2><pre class="log" id="progress"></pre></section>' : ''}
+
+        <!-- 2줄: 지표 -->
+        <section class="card h-full">
+          <div class="card-head"><h2>봇 개요</h2><a class="round-link" href="#/runs" aria-label="실행 내역 보기">${ICON_OUT}</a></div>
+          <div class="tiles tiles-row">
+            <a class="tile" href="#/runs" data-f="done">
+              <div class="tile-label">최근 7일 완료</div>
+              <div class="tile-value"><b data-count="${s.week.done}" data-key="k-done">${s.week.done}</b><small>건</small>${today ? `<span class="tile-tag good">오늘 ${today}</span>` : ''}</div>
+              <div class="tile-chart">${sparkline(done14, `최근 14일 하루별 완료 ${done14.join(', ')}`)}</div>
+            </a>
+            <a class="tile" href="#/runs" data-f="blocked">
+              <div class="tile-label">확인 필요</div>
+              <div class="tile-value"><b data-count="${s.attention.length}" data-key="k-att">${s.attention.length}</b><small>건</small>${s.week.blocked ? `<span class="tile-tag warn">7일 ${s.week.blocked}</span>` : ''}</div>
+              <div class="tile-chart">${lollipop(blocked7, `최근 7일 하루별 확인 필요 ${blocked7.join(', ')}`)}</div>
+            </a>
+            <a class="tile" href="#/runs" data-f="failed">
+              <div class="tile-label">실패 · 7일</div>
+              <div class="tile-value"><b data-count="${s.week.failed}" data-key="k-fail">${s.week.failed}</b><small>건</small>${s.week.failed ? '<span class="tile-tag bad">확인</span>' : '<span class="tile-tag good">없음</span>'}</div>
+              <div class="tile-chart">${sparkline(failed14, `최근 14일 하루별 실패 ${failed14.join(', ')}`, 'bad')}</div>
+            </a>
+            <div class="tile">
+              <div class="tile-label">완료율 · 30일</div>
+              ${gauge(rate, 'rate30', '최근 30일 완료율', rate == null ? '-' : `${rate}%`, `${done30}/${last30.length}`, rate)}
+            </div>
+          </div>
+        </section>
+
+        <!-- 3줄: 처리할 일 -->
+        <section class="card flush h-half">
+          <div class="card-head"><div><h2>확인이 필요한 일감</h2></div>${s.attention.length ? '<a class="desc" href="#/runs" data-f="blocked">모두 보기</a>' : ''}</div>
+          <div class="scroll-list">
+          ${s.attention.length ? s.attention.map(r => `
+            <a class="row" href="#/runs/${r.id}">
+              <span class="avatar ${toneOf(r.status)}" aria-hidden="true">${esc(initials(r.ticket))}</span>
+              <div class="row-main">
+                <div class="row-title">${esc(r.title)}</div>
+                <div class="row-sub">${esc(r.ticket)} · ${esc(STATUS[r.status] ? STATUS[r.status][0] : r.status)}${r.questionCount ? ` · 질문 ${r.questionCount}개` : ''}</div>
+              </div>
+              <span class="row-time">${esc(when(r.time))}</span>
+            </a>`).join('') : '<div class="empty">지금은 확인할 일감이 없어요</div>'}
+          </div>
+        </section>
+
+        <section class="card flush h-half">
+          <div class="card-head"><div><h2>작업 목록</h2><span class="desc">매 회차 시트에서 P열 O · S열 X 인지 다시 확인해요</span></div></div>
+          <div class="scroll-list">
+          ${work.length ? work.map(workRow).join('') : '<div class="empty">아직 알림으로 들어온 일감이 없어요</div>'}
+          </div>
+        </section>
+
+        <!-- 4줄: 통계 -->
+        <section class="card h-third">
+          <div class="card-head"><div><h2>결과 비율</h2><span class="desc">최근 30일 실행 결과</span></div></div>
+          <div class="mix">
+            <div class="mix-total"><b data-count="${last30.length}" data-key="k-runs">${last30.length}</b><span>번 실행</span></div>
+            ${mixBar(parts, last30.length)}
+            <ul class="legend">${parts.map(p => `
+              <li><div class="l-name"><i class="sw-${p.tone}"></i>${p.name}</div>
+              <div class="l-val"><span data-count="${last30.length ? Math.round(p.n / last30.length * 100) : 0}" data-suffix="%" data-key="mix-${p.tone}">${last30.length ? Math.round(p.n / last30.length * 100) : 0}%</span><small>${p.n}건</small></div></li>`).join('')}
+            </ul>
+          </div>
+        </section>
+
+        <section class="card h-third">
+          <div class="card-head"><div><h2>주간 처리량</h2><span class="desc">주별 실행 수, 이번 주 강조</span></div><span class="pill-label">최근 12주</span></div>
+          <div class="bars">${bars(weeks.counts, weeks.labels, `최근 12주 주별 실행 수 ${weeks.counts.join(', ')}`)}</div>
+        </section>
+
+        ${usageCard(s.usage, 'h-third')}
+      </div>`;
 
     document.getElementById('toggle').onclick = () => toggleBot(s);
     document.getElementById('run').onclick = runNow;
     document.getElementById('usage-refresh').onclick = refreshUsage;
-    applyMeters();
+    view.querySelectorAll('[data-f]').forEach(a => { a.onclick = () => { filter.status = a.dataset.f; }; });
+    applyUsageColors();
+    applyGauges();
+    countUp();
+    playEnter();
     if (s.state === 'running') openProgress();
     else if (stream) { stream.close(); stream = null; }
+  }
+
+  // 지금 하는 일 (참고: Harvest order 카드). 실행 중이면 할일 진행, 아니면 마지막 실행
+  const segLast = { title: '', done: 0 }; // 진행 칸: 이미 채워진 칸은 다시 움직이지 않는다
+  function orderCard(s, all) {
+    const p = s.progress;
+    if (s.state === 'running') {
+      if (!p) return `<h2>진행 중인 일감</h2><div class="order-title">일감을 준비하고 있어요</div><p class="desc mt8">요청서를 만들고 Claude를 띄우는 중이에요.</p>`;
+      const total = p.total;
+      const n = Math.min(total, 12);
+      const doneSeg = total ? Math.floor(p.done / total * n) : 0;
+      const prev = segLast.title === p.title ? segLast.done : 0;
+      segLast.title = p.title; segLast.done = doneSeg;
+      const segs = Array.from({ length: n }, (_, i) => `<i class="${i < doneSeg ? `on${i >= prev ? ' fresh' : ''}` : i === doneSeg ? 'now' : ''}" data-i="${Math.max(0, i - prev)}"></i>`).join('');
+      return `
+        <div class="order-top">
+          <div><h2>진행 중인 일감</h2><div class="order-title">${esc(p.title)}</div></div>
+          <span class="avatar" aria-hidden="true">봇</span>
+        </div>
+        ${total ? `
+          <div class="seg-head"><span>할일 ${p.done}/${total}</span><span data-count="${Math.round(p.done / total * 100)}" data-suffix="%" data-key="seg-pct">${Math.round(p.done / total * 100)}%</span></div>
+          <div class="segbar" role="progressbar" aria-label="할일 진행" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${p.done}">${segs}</div>
+          ${p.current ? `<div class="order-now">진행 중: ${esc(p.current)}</div>` : ''}`
+          : '<p class="desc mt8">Claude가 할일 목록을 아직 만들지 않았어요.</p>'}`;
+    }
+    const last = all[all.length - 1];
+    if (!last) return '<h2>마지막 실행</h2><div class="empty">아직 실행한 적이 없어요</div>';
+    const d = durText(durMs(last));
+    return `
+      <div class="order-top">
+        <div><h2>마지막 실행</h2><div class="order-title">${esc(last.title)}</div></div>
+        <a class="round-link" href="#/runs/${last.id}" aria-label="마지막 실행 자세히 보기">${ICON_OUT}</a>
+      </div>
+      <div class="meta-row">${badge(last.status)}<span class="desc">${esc(last.ticket)} · ${esc(when(last.time))}${d ? ` · ${esc(d)} 걸림` : ''}</span></div>`;
   }
 
   // ---------- Claude 사용량 ----------
   const USAGE_SOURCE = { bot: '봇 실행 기록', probe: '지금 확인' };
   let usageAutoTried = false; // 기록이 하나도 없을 때만, 페이지당 한 번 자동으로 확인한다
 
-  function usageMeter(label, w) {
-    if (!w) return `<div class="meter"><div class="meter-head"><span>${esc(label)}</span><b>-</b></div><div class="meter-bar"><i></i></div><div class="meter-sub">정보 없음</div></div>`;
-    // 바는 사용률만큼 채운다: 쓸수록 늘어나고, 한도가 초기화되면 줄어든다
+  function usageGauge(label, key, w) {
+    if (!w) return `<div class="gauge-box"><div class="gauge-label">${esc(label)}</div>${gauge(null, key, label, '-', '사용')}<div class="meter-sub">정보 없음</div></div>`;
+    // 사용률만큼 채운다: 쓸수록 늘어나고, 한도가 초기화되면 줄어든다
     const used = Math.max(0, Math.min(100, w.usedPercent));
     const left = Math.round((100 - used) * 10) / 10;
-    // 폭·색은 applyMeters 가 JS 로 넣는다 (CSP 때문에 HTML 의 style 속성은 무시된다)
     return `
-      <div class="meter" data-key="${esc(label)}" data-to="${used}">
-        <div class="meter-head"><span>${esc(label)}</span><b>${used}% 사용</b></div>
-        <div class="meter-bar" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${used}" aria-label="${esc(label)} 사용률"><i></i></div>
+      <div class="gauge-box" data-used="${used}">
+        <div class="gauge-label">${esc(label)}</div>
+        ${gauge(used, key, `${label} 사용률`, `${Math.round(used)}%`, '사용', Math.round(used))}
         <div class="meter-sub">${left}% 남음 · ${esc(when(w.resetsAt))} 초기화</div>
       </div>`;
   }
 
-  // 사용률 → 색: 0% 초록 → 50% 주황 → 100% 빨강 (테마 색을 섞어 다크 모드에서도 맞게)
+  // 사용률 → 색: 0% 초록 → 50% 주황 → 100% 빨강 (테마 색을 섞어 라이트·다크 모두 맞게)
   function usageColor(used) {
     if (used <= 50) return `color-mix(in oklab, var(--warn) ${Math.round(used * 2)}%, var(--good))`;
     return `color-mix(in oklab, var(--bad) ${Math.round((used - 50) * 2)}%, var(--warn))`;
   }
-
-  const meterLast = {}; // 라벨별 마지막 사용률. 다시 그릴 때 이전 값에서 새 값으로 움직이게 한다
-  function applyMeters() {
-    const meters = view.querySelectorAll('.meter[data-to]');
-    if (!meters.length) return;
-    meters.forEach(m => {
-      const from = meterLast[m.dataset.key] || 0;
-      m.querySelector('.meter-bar i').style.width = `${from}%`;
-      m.style.setProperty('--meter-color', usageColor(from));
-    });
-    void meters[0].offsetWidth; // 시작 값을 먼저 반영시켜야 transition 이 걸린다
-    meters.forEach(m => {
-      const to = Number(m.dataset.to);
-      m.querySelector('.meter-bar i').style.width = `${to}%`;
-      m.style.setProperty('--meter-color', usageColor(to));
-      meterLast[m.dataset.key] = to;
-    });
+  // CSP 때문에 HTML 의 style 속성은 무시된다 → JS 로 넣는다
+  function applyUsageColors() {
+    view.querySelectorAll('.gauge-box[data-used]').forEach(b => b.style.setProperty('--g-color', usageColor(Number(b.dataset.used))));
   }
 
-  function usageCard(u) {
+  function usageCard(u, place = 'span-4') {
     const snap = u && u.snapshot;
     const checking = u && u.checking;
     const sub = snap ? `${esc(when(snap.checkedAt))} 기준 · ${esc(USAGE_SOURCE[snap.source] || snap.source)}` : '아직 확인한 기록이 없어요';
     return `
-      <section class="card">
-        <div class="usage-head">
-          <h2>Claude 남은 사용량 <span class="desc">${sub}</span></h2>
-          <button class="btn soft" id="usage-refresh" ${checking ? 'disabled' : ''}>${checking ? '확인 중…' : '지금 확인'}</button>
+      <section class="card ${place}">
+        <div class="card-head">
+          <div><h2>Claude 남은 사용량</h2><span class="desc">${sub}</span></div>
+          <button class="btn soft small" id="usage-refresh" ${checking ? 'disabled' : ''}>${checking ? '확인 중…' : '지금 확인'}</button>
         </div>
-        ${snap && snap.status === 'rejected' ? '<div class="notice">사용 한도에 도달했어요. 초기화 시각 전까지 봇이 개발을 진행하지 못해요.</div>' : ''}
-        <div class="meters">
-          ${usageMeter('5시간 한도', snap && snap.fiveHour)}
-          ${usageMeter('7일 한도', snap && snap.sevenDay)}
+        ${snap && snap.status === 'rejected' ? '<div class="notice mb8">사용 한도에 도달했어요. 초기화 시각 전까지 봇이 개발을 진행하지 못해요.</div>' : ''}
+        <div class="gauges">
+          ${usageGauge('5시간 한도', 'u5h', snap && snap.fiveHour)}
+          ${usageGauge('7일 한도', 'u7d', snap && snap.sevenDay)}
         </div>
       </section>`;
   }
@@ -275,12 +617,19 @@
   async function refreshHome() {
     const g = gen;
     try {
-      const s = await api('GET', '/api/status');
+      const [s, rl] = await Promise.all([api('GET', '/api/status'), api('GET', '/api/runs')]);
       if (g !== gen) return;
-      const key = JSON.stringify(s);
-      if (key === lastHome || !document.getElementById('sheet').hidden) return; // 바뀐 게 없으면 다시 그리지 않는다
+      const list = rl.runs.slice().reverse(); // 오래된 것 → 최신
+      // 진행 상황만 바뀌었으면 그 카드만 다시 그린다 (진행 로그 스크롤이 튀지 않게)
+      const key = JSON.stringify(Object.assign({}, s, { progress: null })) + list.length + (list.length ? list[list.length - 1].time : '');
+      if (sheet.open) return;
+      if (key === lastHome) {
+        const card = document.getElementById('order-card');
+        if (card) { card.innerHTML = orderCard(s, list); playEnter(); countUp(); }
+        return;
+      }
       lastHome = key;
-      drawHome(s);
+      drawHome(s, list);
       if (!usageAutoTried && s.usage && !s.usage.snapshot && !s.usage.checking) { usageAutoTried = true; refreshUsage(); }
     } catch (e) {
       if (g !== gen) return;
@@ -298,37 +647,88 @@
 
   // ---------- 내역 ----------
   const FILTERS = [['all', '전체'], ['done', '완료'], ['blocked', '확인 필요'], ['failed', '실패']];
-  const groupOf = s => (s === 'pushed' || s === 'modified' ? 'done' : s === 'blocked' ? 'blocked' : 'failed');
+  const groupOf = s => (s === 'pushed' || s === 'modified' || s === 'unchanged' ? 'done' : s === 'blocked' ? 'blocked' : 'failed');
+  const WEEKDAY = ['일', '월', '화', '수', '목', '금', '토'];
+  let weekShift = 0; // 0 = 오늘까지 7일, -1 = 그 전 7일 …
+
+  function filteredRuns() {
+    const q = filter.q.trim().toLowerCase();
+    return runsCache.filter(r => (filter.status === 'all' || groupOf(r.status) === filter.status)
+      && (!q || r.ticket.toLowerCase().includes(q) || r.title.toLowerCase().includes(q)));
+  }
+
+  // 실행 타임라인 (참고: Maren 예약 간트). 줄 = 일감, 칸 = 날짜, 막대 = 실행 1회
+  function drawTimeline(rows) {
+    const end = startOfDay(Date.now());
+    end.setDate(end.getDate() + weekShift * 7);
+    const days = Array.from({ length: 7 }, (_, i) => { const d = new Date(end); d.setDate(d.getDate() - 6 + i); return d; });
+    const keys = days.map(dayKey);
+    const todayKey = dayKey(Date.now());
+    const inWeek = rows.filter(r => keys.includes(dayKey(r.time)));
+    const byTicket = new Map();
+    inWeek.slice().sort((a, b) => b.id - a.id).forEach(r => {
+      if (!byTicket.has(r.ticket)) byTicket.set(r.ticket, { title: r.title, runs: [] });
+      byTicket.get(r.ticket).runs.push(r);
+    });
+    const range = `${days[0].getMonth() + 1}월 ${days[0].getDate()}일 – ${days[6].getMonth() + 1}월 ${days[6].getDate()}일`;
+    document.getElementById('tl-range').textContent = `${range} · 일감 ${byTicket.size}개 · 실행 ${inWeek.length}번`;
+    document.getElementById('tl-next').disabled = weekShift >= 0;
+    const head = `<div></div>${days.map((d, i) => `<div class="tl-day ${keys[i] === todayKey ? 'today' : ''}">${WEEKDAY[d.getDay()]}<b>${d.getDate()}</b></div>`).join('')}`;
+    const body = [...byTicket.entries()].map(([ticket, t]) => `
+      <div class="tl-name"><span class="avatar ${toneOf(t.runs[0].status)}" aria-hidden="true">${esc(initials(ticket))}</span><div><b>${esc(ticket)}</b><span>${esc(t.title)}</span></div></div>
+      ${keys.map(k => `<div class="tl-cell ${k === todayKey ? 'today' : ''}">${t.runs.filter(r => dayKey(r.time) === k).reverse().map(r => {
+        const d = durText(durMs(r));
+        const label = STATUS[r.status] ? STATUS[r.status][0] : r.status;
+        const t0 = new Date(r.start || r.time);
+        const text = d || `${pad(t0.getHours())}:${pad(t0.getMinutes())}`;
+        return `<a class="tl-bar ${toneOf(r.status)}" href="#/runs/${r.id}" title="${esc(`${r.title} · ${label}${d ? ` · ${d}` : ''}`)}" aria-label="${esc(`${ticket} ${label}, ${when(r.time)}${d ? `, ${d} 걸림` : ''}`)}">${esc(text)}</a>`;
+      }).join('')}</div>`).join('')}`).join('');
+    document.getElementById('tl').innerHTML = head + (body || '<div class="tl-empty empty">이 기간에는 실행이 없어요</div>');
+  }
 
   function drawRunList() {
-    const q = filter.q.trim().toLowerCase();
-    const rows = runsCache.filter(r => (filter.status === 'all' || groupOf(r.status) === filter.status)
-      && (!q || r.ticket.toLowerCase().includes(q) || r.title.toLowerCase().includes(q)));
+    const rows = filteredRuns();
     document.getElementById('list').innerHTML = rows.length ? rows.map(runRow).join('') : '<div class="empty">조건에 맞는 실행이 없어요</div>';
     document.getElementById('count').textContent = `${rows.length}건`;
+    drawTimeline(rows);
   }
 
   async function runs() {
+    document.getElementById('top-q').value = filter.q;
     view.innerHTML = `
-      <div class="filters">
-        ${FILTERS.map(([k, l]) => `<button class="chip ${filter.status === k ? 'on' : ''}" data-f="${k}">${l}</button>`).join('')}
+      <section class="card">
+        <div class="card-head">
+          <div><h2>실행 타임라인</h2><span class="desc" id="tl-range"></span></div>
+          <div class="tl-tools">
+            <div class="tl-legend" aria-hidden="true"><span><i class="sw-good"></i>완료</span><span><i class="sw-warn"></i>확인 필요</span><span><i class="sw-bad"></i>실패</span></div>
+            <button class="round-link" id="tl-prev" aria-label="이전 7일"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg></button>
+            <button class="round-link" id="tl-next" aria-label="다음 7일"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 6 6 6-6 6"/></svg></button>
+          </div>
+        </div>
+        <div class="tl-wrap"><div class="tl" id="tl"><div class="tl-empty empty">불러오는 중이에요</div></div></div>
+      </section>
+      <div class="filters mt16">
+        ${FILTERS.map(([k, l]) => `<button class="chip ${filter.status === k ? 'on' : ''}" data-f="${k}" aria-pressed="${filter.status === k}">${l}</button>`).join('')}
         <input class="search" id="q" type="search" placeholder="티켓번호나 제목으로 찾기" aria-label="티켓번호나 제목으로 찾기" value="${esc(filter.q)}">
       </div>
-      <section class="card flush"><h2>실행 내역 <span class="desc" id="count"></span></h2><div id="list"><div class="empty">불러오는 중이에요</div></div></section>`;
+      <section class="card flush mt16"><div class="card-head"><h2>실행 내역 <span class="desc" id="count"></span></h2></div><div id="list"><div class="empty">불러오는 중이에요</div></div></section>`;
     view.querySelectorAll('.chip').forEach(c => {
       c.onclick = () => {
         filter.status = c.dataset.f;
-        view.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === c));
+        view.querySelectorAll('.chip').forEach(x => { x.classList.toggle('on', x === c); x.setAttribute('aria-pressed', x === c); });
         drawRunList();
       };
     });
-    document.getElementById('q').oninput = e => { filter.q = e.target.value; drawRunList(); };
+    document.getElementById('q').oninput = e => { filter.q = e.target.value; document.getElementById('top-q').value = filter.q; drawRunList(); };
+    document.getElementById('tl-prev').onclick = () => { weekShift--; drawTimeline(filteredRuns()); };
+    document.getElementById('tl-next').onclick = () => { if (weekShift < 0) { weekShift++; drawTimeline(filteredRuns()); } };
     const g = gen;
     try {
       const data = await api('GET', '/api/runs');
       if (g !== gen) return;
       runsCache = data.runs;
       drawRunList();
+      playEnter();
     } catch (e) {
       if (g !== gen) return;
       document.getElementById('list').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
@@ -373,18 +773,23 @@
   }
 
   async function detail(id) {
-    view.innerHTML = '<a class="back" href="#/runs">‹ 내역</a><section class="card"><div class="empty">불러오는 중이에요</div></section>';
+    view.innerHTML = `<a class="back" href="#/runs">${ICON_BACK}내역</a><section class="card"><div class="empty">불러오는 중이에요</div></section>`;
     const g = gen;
     try {
       const r = await api('GET', `/api/runs/${id}`);
       if (g !== gen) return;
       const mr = /^https?:\/\//.test(r.mr) ? `<section class="card"><h2>MR 만들기</h2><a class="btn soft link" href="${esc(r.mr)}" target="_blank" rel="noopener noreferrer">GitLab에서 열기</a></section>` : '';
       view.innerHTML = `
-        <a class="back" href="#/runs">‹ 내역</a>
+        <a class="back" href="#/runs">${ICON_BACK}내역</a>
         <section class="card">
           ${badge(r.status)}
           <div class="detail-title">${esc(r.title)}</div>
-          <div class="desc">${esc(r.ticket)} · ${esc(modeText(r.mode))} · ${esc(when(r.time))}</div>
+          <div class="desc">${esc(r.ticket)} · ${esc(modeText(r.mode))}</div>
+          <div class="meta-row">
+            ${r.start ? `<span class="pill-label">시작 ${esc(when(r.start))}</span>` : ''}
+            <span class="pill-label">${r.start ? '종료' : '기록'} ${esc(when(r.time))}</span>
+            ${durText(durMs(r)) ? `<span class="pill-label">${esc(durText(durMs(r)))} 걸림</span>` : ''}
+          </div>
         </section>
         <section class="card"><h2>요약</h2><p>${esc(r.summary || '요약이 없어요')}</p></section>
         ${listCard('답이 필요한 질문', r.questions)}
@@ -394,9 +799,10 @@
         ${listCard('메모', r.notes)}
         ${r.hasFolder ? fileCard('요청서', r.request) + fileCard('진행 로그', r.log)
           : '<section class="card"><p class="desc">작업폴더가 정리돼서 요청서와 진행 로그는 볼 수 없어요.</p></section>'}`;
+      playEnter();
     } catch (e) {
       if (g !== gen) return;
-      view.innerHTML = `<a class="back" href="#/runs">‹ 내역</a><section class="card"><p>${esc(e.message)}</p></section>`;
+      view.innerHTML = `<a class="back" href="#/runs">${ICON_BACK}내역</a><section class="card"><p>${esc(e.message)}</p></section>`;
     }
   }
 
@@ -410,6 +816,7 @@
     let picked = s.intervalMinutes;
     const draw = () => {
       view.innerHTML = `
+        <section class="card" id="theme-card"></section>
         <section class="card">
           <h2>일감 확인 간격</h2>
           <p class="desc">봇이 새 일감이 있는지 확인하는 주기예요. 지금은 ${s.intervalMinutes}분이에요.</p>
@@ -422,8 +829,10 @@
           <div class="kv"><span>한 번 실행 제한</span><b>${s.timeLimitMinutes ? `${s.timeLimitMinutes / 60}시간` : '없음'}</b></div>
           <div class="kv"><span>봇 폴더</span><b>${esc(s.botDir)}</b></div>
         </section>`;
-      view.querySelectorAll('.seg .chip').forEach(c => { c.onclick = () => { picked = Number(c.dataset.m); draw(); }; });
+      view.querySelectorAll('[data-m]').forEach(c => { c.onclick = () => { picked = Number(c.dataset.m); draw(); }; });
       document.getElementById('save').onclick = save;
+      drawThemeCard();
+      playEnter();
     };
     const save = async () => {
       if (!await confirmSheet(`${picked}분마다 확인할까요?`, `지금은 ${s.intervalMinutes}분마다 확인하고 있어요.`, '변경하기')) return;
@@ -437,8 +846,23 @@
     draw();
   }
 
+  // 화면 테마 (설정): 다크(기본) · 라이트 · 시스템
+  function drawThemeCard() {
+    const card = document.getElementById('theme-card');
+    if (!card) return;
+    const mode = schemeMode();
+    const opts = [['dark', '다크 (기본)'], ['light', '라이트'], ['system', `시스템 (지금 ${sysDark.matches ? '다크' : '라이트'})`]];
+    card.innerHTML = `
+      <h2>화면 테마</h2>
+      <p class="desc">이 브라우저에만 저장돼요. 위쪽 해·달 버튼으로도 바로 바꿀 수 있어요.</p>
+      <div class="seg theme-seg mt16" role="radiogroup" aria-label="화면 테마">${opts.map(([k, l]) =>
+        `<button class="chip ${k === mode ? 'on' : ''}" role="radio" aria-checked="${k === mode}" data-scheme="${k}">${esc(l)}</button>`).join('')}</div>`;
+    card.querySelectorAll('[data-scheme]').forEach(b => { b.onclick = () => setScheme(b.dataset.scheme); });
+  }
+
   // ---------- 하네스 ----------
-  const pct = r => (r && r.total ? `${Math.round(r.done / r.total * 100)}%` : '-');
+  const pctNum = r => (r && r.total ? Math.round(r.done / r.total * 100) : null);
+  const pct = r => (pctNum(r) == null ? '-' : `${pctNum(r)}%`);
   const ACTION = { edit: '수정', restore: '되돌림' };
 
   function drawHarness(d) {
@@ -455,17 +879,28 @@
         <div class="hero-sub">지침, 권한, 가드를 고치면 다음 실행부터 적용돼요. 고치기 전 내용은 변경 기록에 남아요.</div>
         ${d.running ? '<div class="notice">봇이 일감을 처리하는 중이라 지금은 바꿀 수 없어요.</div>' : ''}
       </section>
-      <div class="stats two">
-        <div class="stat"><b>${pct(d.stats.all)}</b><span>전체 완료율 · ${d.stats.all.total}번 중 ${d.stats.all.done}번</span></div>
-        <div class="stat"><b>${pct(after)}</b><span>${after ? `마지막 변경 뒤 · ${after.total}번 중 ${after.done}번` : '아직 변경한 적이 없어요'}</span></div>
-      </div>
+      <section class="card harness-stats">
+        <h2>완료율</h2>
+        <div class="gauges harness-gauges">
+          <div class="gauge-box">
+            <div class="gauge-label">전체</div>
+            ${gauge(pctNum(d.stats.all), 'h-all', '전체 완료율', pct(d.stats.all), '완료', pctNum(d.stats.all))}
+            <div class="meter-sub">${d.stats.all.total}번 중 ${d.stats.all.done}번</div>
+          </div>
+          <div class="gauge-box">
+            <div class="gauge-label">마지막 변경 뒤</div>
+            ${gauge(pctNum(after), 'h-after', '마지막 변경 뒤 완료율', pct(after), '완료', pctNum(after))}
+            <div class="meter-sub">${after ? `${after.total}번 중 ${after.done}번` : '아직 변경한 적이 없어요'}</div>
+          </div>
+        </div>
+      </section>
       <section class="card" id="ai-card"></section>
       <section class="card flush">
         <h2>지침과 규칙</h2>
         ${d.files.map(f => `
           <a class="row" href="#/harness/${f.id}">
             <div class="row-main"><div class="row-title">${esc(f.label)}</div><div class="row-sub wrap-text">${esc(f.desc)}</div><div class="row-sub">${esc(when(f.modified))}에 수정됨</div></div>
-            <span class="row-arrow" aria-hidden="true">›</span>
+            ${ICON_NEXT}
           </a>`).join('')}
       </section>
       <section class="card">
@@ -489,6 +924,9 @@
       </section>`;
 
     drawDiagnosis();
+    applyGauges();
+    countUp();
+    playEnter();
 
     const g = gen;
     const apply = async (title, desc, okLabel, call, done) => {
@@ -591,7 +1029,7 @@
 
   async function harness() {
     const g = gen;
-    if (!view.querySelector('.stats.two')) view.innerHTML = '<section class="card"><div class="empty">불러오는 중이에요</div></section>';
+    if (!view.querySelector('.harness-stats')) view.innerHTML = '<section class="card"><div class="empty">불러오는 중이에요</div></section>';
     try {
       const d = await api('GET', '/api/harness');
       if (g === gen) drawHarness(d);
@@ -618,7 +1056,7 @@
 
   async function harnessEdit(id) {
     const g = gen;
-    const back = '<a class="back" href="#/harness">‹ 하네스</a>';
+    const back = `<a class="back" href="#/harness">${ICON_BACK}하네스</a>`;
     view.innerHTML = `${back}<section class="card"><div class="empty">불러오는 중이에요</div></section>`;
     let f;
     try { f = await api('GET', `/api/harness/file/${id}`); } catch (e) { if (g === gen) view.innerHTML = `${back}<section class="card"><p>${esc(e.message)}</p></section>`; return; }
@@ -641,6 +1079,7 @@
         </div>
       </section>
       <section class="card" id="diff-card" hidden><h2>바뀐 부분</h2><pre class="log diff" id="diff"></pre></section>`;
+    playEnter();
     const ta = document.getElementById('editor');
     const save = document.getElementById('save');
     const delta = document.getElementById('delta');
@@ -732,8 +1171,12 @@
     const m = /^\/runs\/(\d+)$/.exec(h);
     const e = /^\/harness\/([a-z-]+)$/.exec(h);
     const tab = h === '/' ? 'home' : h.startsWith('/runs') ? 'runs' : h.startsWith('/harness') ? 'harness' : 'settings';
-    document.querySelectorAll('#tabs a').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
+    document.querySelectorAll('#tabs a[data-tab]').forEach(a => {
+      if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+    });
+    view.classList.toggle('narrow', tab === 'settings' || tab === 'harness' || !!m);
     window.scrollTo(0, 0);
+    pendingEnter = true;
     if (m) detail(m[1]);
     else if (e) harnessEdit(e[1]);
     else if (h === '/runs') runs();
@@ -742,5 +1185,6 @@
     else home();
   }
   window.addEventListener('hashchange', route);
+  refreshChip();
   route();
 })();

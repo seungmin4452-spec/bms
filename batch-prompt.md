@@ -4,7 +4,7 @@
 - 모드: {mode} (new = 요청사항 기준 신규, feedback = 테스트 추가요청 반영)
 - 요청 파일: {requestFile}
 - 결과 파일: {resultFile}
-- 수정 가능한 프로젝트 (둘 다 SVN 작업본, trunk):
+- 수정 가능한 프로젝트 (모두 SVN 작업본, trunk):
 {projectList}
 
 ## 1. 시작 전 점검
@@ -15,7 +15,7 @@
 - 요청 파일을 읽고, 첨부 이미지가 있으면 Read 로 직접 본다.
 - "첨부 파일" 항목의 파일도 Read 로 반드시 본다. 요청서가 지목한 수정 쿼리·소스 파일이 없거나 다운로드 실패이면 직접 작성하지 말고 blocked 로 끝내고 파일을 요청한다.
 - 어느 프로젝트를 고칠지 스스로 정한다. 근거는 코드에서 찾는다: `src/Config.properties`(스케줄 cron), `src/com/sunjin/agent/controller/MainController.java`(배치 등록), 배치 서비스명(`SchdGRP_*`), 관련 Controller/SQL.
-  - 두 프로젝트에 모두 걸리면 둘 다 고친다. 결정과 근거는 `decisions` 에 적는다.
+  - 여러 프로젝트에 걸리면 모두 고친다. 결정과 근거는 `decisions` 에 적는다.
 - **모호하면 구현하지 말고 멈춘다(blocked).** 기준: 같은 문장을 두 가지 이상으로 구현할 수 있고 그 차이가 데이터·스케줄 결과를 바꾸는 경우. 질문은 `questions` 에 적는다.
   - blocked 판단은 파일을 고치기 **전에** 한다.
 

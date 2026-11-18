@@ -173,7 +173,7 @@ function branchExists(branch) {
   return out.trim().length > 0;
 }
 
-// ---------- SVN (BATCH 일감: PIGON_GRP_AGENT_REPL / CONT) ----------
+// ---------- SVN (BATCH 일감: PIGON_GRP_AGENT_REPL / CONT / API, 모바일: PigOn) ----------
 // 작업본에는 개발자의 미커밋 변경이 섞여 있을 수 있다. 실행 전후 svn status + 파일 해시를 비교해
 // 이번 일감에서 새로 바뀐 파일만 골라낸다. (실행 전부터 수정돼 있던 파일도 내용이 또 바뀌면 포함)
 function svnSnapshot(dirs) {
@@ -328,19 +328,25 @@ function writeRequest(ticket, plan, imageFiles, dir, linkedFiles = []) {
 }
 
 // ---------- Claude 실행 ----------
-function runClaude(ticket, plan, requestFile, dir, isBatch) {
+// kind: 'web'(pigon_pc, /ticket-auto) / 'batch'(SVN 배치 에이전트들) / 'mobile'(PigOn, 웹 반영 뒤 후속)
+function runClaude(ticket, plan, requestFile, dir, kind, vars = {}) {
   const slash = p => p.replace(/\\/g, '/');
+  const fill = (file, values) => Object.entries(values).reduce(
+    (s, [k, v]) => s.split(`{${k}}`).join(v),
+    fs.readFileSync(path.join(ROOT, file), 'utf8'));
+  const common = { releaseId: ticket.releaseId, mode: plan.mode, requestFile: slash(requestFile), resultFile: slash(path.join(dir, 'result.json')) };
   let prompt, cwd = CONFIG.projectDir, args = CONFIG.claude.args;
-  if (isBatch) {
+  if (kind === 'batch') {
     const dirs = CONFIG.batch.projectDirs;
-    prompt = fs.readFileSync(path.join(ROOT, CONFIG.batch.promptFile), 'utf8')
-      .split('{releaseId}').join(ticket.releaseId)
-      .split('{mode}').join(plan.mode)
-      .split('{requestFile}').join(slash(requestFile))
-      .split('{resultFile}').join(slash(path.join(dir, 'result.json')))
-      .split('{projectList}').join(dirs.map(d => `  - ${path.basename(d)}: ${d}`).join('\n'));
+    prompt = fill(CONFIG.batch.promptFile, Object.assign(common, {
+      projectList: dirs.map(d => `  - ${path.basename(d)}: ${d}`).join('\n'),
+    }));
     cwd = dirs[0];
     args = args.concat(...dirs.slice(1).map(d => ['--add-dir', d]));
+  } else if (kind === 'mobile') {
+    // pigon_pc 는 add-dir 하지 않는다 (읽기는 Read 허용으로 충분, 편집은 막힘)
+    prompt = fill(CONFIG.mobile.promptFile, Object.assign(common, { projectDir: CONFIG.mobile.projectDir }, vars));
+    cwd = CONFIG.mobile.projectDir;
   } else {
     prompt = CONFIG.claude.promptTemplate
       .replace('{releaseId}', ticket.releaseId)
@@ -366,7 +372,7 @@ function runClaude(ticket, plan, requestFile, dir, isBatch) {
     fs.writeSync(human, s);
     fs.writeSync(progress, s);
   };
-  emit(`=== ${ticket.releaseId} ${ticket.title} (${isBatch ? 'BATCH' : 'WEB'} / ${plan.mode}) 시작`);
+  emit(`=== ${ticket.releaseId} ${ticket.title} (${kind.toUpperCase()} / ${plan.mode}) 시작`);
   emit(`작업폴더: ${dir}`);
 
   return new Promise(resolve => {
@@ -480,10 +486,11 @@ function readResult(dir) {
   }
 }
 
-function writeSummary(ticket, plan, result, dir) {
+function writeSummary(ticket, plan, result, dir, startedAt) {
   const r = result || {};
   const lines = [
     `${new Date().toISOString()} | ${r.status || 'no-result'} | ${plan.mode} | ${ticket.releaseId} | ${ticket.title}`,
+    startedAt ? `  시작: ${new Date(startedAt).toISOString()}` : '',
     `  요약: ${r.summary || '(result.json 없음 — claude.log 확인)'}`,
     r.mrLink ? `  MR: ${r.mrLink}` : '',
     (r.questions || []).length ? `  질문: ${r.questions.join(' / ')}` : '',
@@ -514,13 +521,16 @@ async function processTicket(no, threadName, token, state, rows, opts = {}) {
   const ticket = await loadTicket(no, token, { rows, withDoc: false });
   if (!ticket) { log(`No ${no}: 시트에 없음 → 건너뜀`); return 'done'; }
   const tag = `No ${no} [${ticket.releaseId || ticket.changeId}] ${ticket.title}`;
-  // WEB → pigon_pc (git, /ticket-auto), BATCH → PIGON_GRP_AGENT_REPL/CONT (SVN, 로컬 수정까지만)
+  // WEB → pigon_pc (git, /ticket-auto) 후 다음 회차에 PigOn(모바일, SVN 로컬 수정까지만) 후속 반영
+  // BATCH → PIGON_GRP_AGENT_REPL/CONT/API (SVN, 로컬 수정까지만)
   const isBatch = ticket.service === 'BATCH';
   if (ticket.project !== 'PIGON' || !['WEB', 'BATCH'].includes(ticket.service)) { log(`${tag}: ${ticket.project}/${ticket.service} → 대상 아님`); return 'done'; }
   if (!ticket.developer.includes(CONFIG.developerName)) { log(`${tag}: 개발담당자 ${ticket.developer || '(미지정)'} → 대상 아님`); return 'done'; }
   // 내 일감은 작업 목록에 남겨 매 회차 시트 상태를 다시 본다 (완료한 일감도 P=O, S=X 가 되면 추가 수정사항)
   const tState = state.tickets[no] || (state.tickets[no] = { releaseId: ticket.releaseId || null, requestDone: false, processedHashes: [], attempts: 0 });
   tState.title = ticket.title;
+  // 웹 반영이 끝나고 모바일 후속 반영이 남아 있으면 그것부터 한다 (시트 알림 체크와 무관)
+  if (tState.mobilePending) return runMobile(ticket, tag, tState, threadName, token, state);
   // 시트 P열 알림 체크 O, S열 알림 체크 X 인 일감만 처리
   if (!ticket.alertP || ticket.alertS) {
     if (!opts.quiet) log(`${tag}: 알림 체크 P=${ticket.alertP ? 'O' : 'X'} S=${ticket.alertS ? 'O' : 'X'} (P=O, S=X 만 대상) → 이번 회차 대상 아님`);
@@ -584,7 +594,7 @@ async function processTicket(no, threadName, token, state, rows, opts = {}) {
   const requestFile = writeRequest(ticket, plan, images, dir, linked);
   log(`${tag}: 모드=${plan.mode}, 추가요청 블록=${plan.blocks.length}, 이미지=${images.length}, 첨부파일=${linked.length}, 작업폴더=${dir}`);
 
-  const result = await runClaude(ticket, plan, requestFile, dir, isBatch);
+  const result = await runClaude(ticket, plan, requestFile, dir, isBatch ? 'batch' : 'web');
   if (result.dry) { log(`${tag}: 처리 완료 (dry-run)`); return 'done'; }
   if (isBatch) {
     const files = changedSince(before, svnSnapshot(CONFIG.batch.projectDirs));
@@ -598,7 +608,7 @@ async function processTicket(no, threadName, token, state, rows, opts = {}) {
   }
 
   const status = (result.result && result.result.status) || 'no-result';
-  writeSummary(ticket, plan, result.result, dir);
+  writeSummary(ticket, plan, result.result, dir, startedAt);
   log(`${tag}: claude 종료코드 ${result.code}, 결과 ${status}`);
   tState.lastStatus = status;
   tState.lastRunAt = new Date().toISOString();
@@ -637,6 +647,18 @@ async function processTicket(no, threadName, token, state, rows, opts = {}) {
     handled.forEach(b => tState.processedHashes.push(b.hash));
     if (CONFIG.notifyChat && threadName) {
       await replyInThread(token, threadName, `🤖 ${ticket.releaseId} ${plan.mode === 'new' ? '신규 개발' : '추가요청 반영'} 완료 — ${status === 'pushed' ? '브랜치 push됨' : 'SVN 로컬 수정(미커밋)'}, 개발자 검토 대기`);
+    }
+    // WEB 실행(/ticket-auto)이 result.mobile 에 모바일(PigOn) 반영 필요 여부를 판단해 둔다.
+    // 필요할 때만 다음 회차에 모바일 반영을 돌린다 (폴링 1회당 Claude 1건 원칙). 판단이 없으면 모바일 실행에서 다시 판단한다
+    if (!isBatch && CONFIG.mobile) {
+      const m = r.mobile;
+      if (m && m.needed === false) {
+        log(`${tag}: 모바일(PigOn) 반영 불필요 — ${m.reason || '(사유 없음)'}`);
+        return 'done';
+      }
+      tState.mobilePending = { releaseId: ticket.releaseId, mode: plan.mode, webDir: dir, attempts: 0 };
+      log(`${tag}: 웹 반영 완료 → 모바일(PigOn) 반영은 다음 폴링에서 (${m ? '필요: ' + (m.reason || '') : '웹 실행 판단 없음'})`);
+      return 'queued';
     }
     return 'done';
   }
@@ -680,7 +702,87 @@ async function processTicket(no, threadName, token, state, rows, opts = {}) {
   return 'done';
 }
 
-const STATUS_TEXT = { pushed: '완료(push)', modified: '완료(SVN 로컬 수정)', blocked: '확인 필요', failed: '실패', 'no-result': '결과 없음' };
+const STATUS_TEXT = { pushed: '완료(push)', modified: '완료(SVN 로컬 수정)', unchanged: '해당 없음(변경 불필요)', blocked: '확인 필요', failed: '실패', 'no-result': '결과 없음' };
+
+// ---------- 모바일(PigOn) 후속 반영 ----------
+// 웹(pigon_pc) 브랜치가 push 된 뒤, 같은 기능이 모바일에 있으면 PigOn 작업본에 반영한다 (SVN 로컬 수정까지만).
+// 반환값은 processTicket 과 같다. 결과와 관계없이 일감의 웹 처리 상태(requestDone·processedHashes)는 건드리지 않는다.
+async function runMobile(ticket, tag, tState, threadName, token, state) {
+  const job = tState.mobilePending;
+  if (claudeRan) { log(`${tag}: 이번 회차에 이미 1건 실행함 → 모바일(PigOn) 반영은 다음 폴링으로`); return 'queued'; }
+  ticket.releaseId = job.releaseId;
+  const dirs = [CONFIG.mobile.projectDir];
+  const before = svnSnapshot(dirs);
+  const startedAt = Date.now();
+  const dir = path.join(RUN_DIR, job.releaseId, `${stamp()}-${job.mode}-mobile`);
+  fs.mkdirSync(dir, { recursive: true });
+
+  // 웹 변경분: 티켓 브랜치가 main 에서 갈라진 뒤의 전체 diff (feedback 이면 이전 반영분도 포함 → 프롬프트에서 미반영분만 하도록 안내)
+  const webDiff = path.join(dir, 'web.diff');
+  try {
+    fs.writeFileSync(webDiff, execFileSync('git', ['diff', `origin/main...${job.releaseId}`], { cwd: CONFIG.projectDir, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 }));
+  } catch (e) {
+    log(`${tag}: 웹 diff 생성 실패 ${e.message}`);
+    fs.writeFileSync(webDiff, `(웹 diff 생성 실패: ${e.message}\npigon_pc 에서 git diff origin/main...${job.releaseId} 로 직접 확인할 것)\n`);
+  }
+  const slash = p => p.replace(/\\/g, '/');
+  const requestFile = path.join(job.webDir, 'request.md');
+  log(`${tag}: 모바일(PigOn) 반영 시작 (${job.mode}), 작업폴더=${dir}`);
+  const result = await runClaude(ticket, { mode: job.mode }, requestFile, dir, 'mobile', {
+    webDiff: slash(webDiff),
+    webResult: slash(path.join(job.webDir, 'result.json')),
+  });
+  if (result.dry) { delete tState.mobilePending; return 'done'; }
+  const files = changedSince(before, svnSnapshot(dirs));
+  fs.writeFileSync(path.join(dir, 'changed-files.json'), JSON.stringify(files, null, 2));
+  const r = Object.assign(result.result || {}, { batchFiles: files });
+  const status = r.status || 'no-result';
+  writeSummary(ticket, { mode: 'mobile' }, r, dir, startedAt);
+  log(`${tag}: 모바일 claude 종료코드 ${result.code}, 결과 ${status}`);
+  state.batchResults = (state.batchResults || []).concat(`${job.releaseId} 모바일 ${STATUS_TEXT[status] || status}`);
+
+  if (status === 'modified' || status === 'unchanged') {
+    delete tState.mobilePending;
+    if (CONFIG.notifyChat && threadName) {
+      await replyInThread(token, threadName, `🤖 ${job.releaseId} 모바일(PigOn) ${status === 'modified' ? 'SVN 로컬 수정(미커밋), 개발자 검토 대기' : '반영 불필요 — ' + (r.summary || '')}`);
+    }
+    return 'done';
+  }
+  if (status === 'blocked') {
+    // 웹은 이미 끝났으므로 모바일 질문은 알리기만 하고, 모바일 반영은 개발자가 판단한다
+    delete tState.mobilePending;
+    const qs = (r.questions || []).map((q, i) => `${i + 1}. ${q}`);
+    await info('❓', {
+      title: '모바일(PigOn) 반영 확인 필요 (구현하지 않고 멈춤)',
+      subtitle: `${job.releaseId} ${ticket.title}`,
+      items: qs.length ? qs : [r.summary || '(질문 없음 — 관리 페이지에서 진행 로그 확인)'],
+      note: '웹(pigon_pc)은 반영 완료됐어요. 모바일은 직접 반영하거나, 다시 돌리려면 웹 추가요청과 함께 요청하세요.',
+      link: true,
+    }, log);
+    return 'done';
+  }
+  job.attempts++;
+  const why = `${status}${r.failedStep ? ` — ${r.failedStep.slice(0, 200)}` : ''}`;
+  if (job.attempts < MAX_ATTEMPTS) {
+    await alert(null, {
+      title: '모바일(PigOn) 반영 오류',
+      subtitle: `${job.releaseId} ${ticket.title}`,
+      fields: [['원인', why]],
+      note: '다음 폴링에 1회 다시 시도해요.',
+      link: true,
+    }, log);
+    return 'retry';
+  }
+  delete tState.mobilePending;
+  await alert(null, {
+    title: `모바일(PigOn) 반영 ${MAX_ATTEMPTS}회 실패 — 중단`,
+    subtitle: `${job.releaseId} ${ticket.title}`,
+    fields: [['원인', why]],
+    note: '웹(pigon_pc)은 반영 완료됐어요. 모바일은 직접 반영해 주세요.',
+    link: true,
+  }, log);
+  return 'done';
+}
 
 // ---------- main ----------
 (async () => {
