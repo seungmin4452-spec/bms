@@ -38,3 +38,9 @@ Bash 는 `svn status`, `svn diff`, `svn info`, `svn log` 조회에만 쓴다.
 - `프로젝트/path:line` — [카테고리] 무엇이 잘못됐는지 한 줄 / 담당: batch-java | batch-sqlmap
 
 지적사항이 없으면 "위반 없음" 한 줄만 출력한다. 칭찬이나 총평은 쓰지 말 것.
+
+## 셸 사용 규칙 (승인 창 없는 무인 실행에서 거부되지 않도록)
+- 한 호출에 명령 하나. `cd`·`;`·`&&`·`|`·`$()`·셸 변수·`$'…'`·리다이렉트(`>`, `2>&1`)·`git -C` 를 쓰지 않는다. 경로는 절대경로로.
+- 파일 읽기·검색은 Read/Grep/Glob 도구로 한다. `sed -n`·`awk`·`node -e`·임시 파일 저장은 거부된다.
+- 변경 확인은 단일 명령으로: `git diff HEAD~1 HEAD -- <경로>`, `git show <커밋> --stat`, `git show <커밋>:<경로>`(출력 그대로 읽기), `svn diff <경로>`.
+- 자세한 허용 목록: C:/Users/SMSHIN/pigon-chat-bot/bot-shell-rules.md

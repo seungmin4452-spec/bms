@@ -98,6 +98,19 @@
     <button class="btn main" id="sheet-ok" value="ok"></button>
   </form>
 </dialog>
+<!-- 스크린샷 크게 보기: 같은 화면 위에 띄운다. Esc · 바깥 누르기로 닫고, ←/→ 로 다른 장면으로 넘어간다 -->
+<dialog class="viewer" id="viewer" closedby="any" aria-label="스크린샷 크게 보기">
+  <div class="viewer-bar">
+    <span class="viewer-cap" id="viewer-cap"></span>
+    <span class="viewer-pos" id="viewer-pos"></span>
+    <form method="dialog"><button class="viewer-close" aria-label="닫기" autofocus>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button></form>
+  </div>
+  <img class="viewer-img" id="viewer-img" alt="">
+  <button class="viewer-nav prev" id="viewer-prev" type="button" aria-label="이전 스크린샷"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button>
+  <button class="viewer-nav next" id="viewer-next" type="button" aria-label="다음 스크린샷"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button>
+</dialog>
 <div class="toast" id="toast" popover="manual"></div>
 <div class="sr-only" id="announce" aria-live="polite"></div>
 <script src="/app.js"></script>

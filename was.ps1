@@ -74,12 +74,13 @@ function Our-Pid {
 }
 
 function Do-Build {
-    Write-Output "build: mvn clean package -> $BuildLog"
-    $args1 = @('-o', '-B', '-DskipTests', '-Dproject.build.sourceEncoding=UTF-8', 'clean', 'package')
+    # Tomcat runs the exploded dir (target\pigon_pc), so skip the .war zip and test compile (saves ~4 min)
+    Write-Output "build: mvn clean compile war:exploded -> $BuildLog"
+    $args1 = @('-f', (Join-Path $Project 'pom.xml'), '-o', '-B', '-Dmaven.test.skip=true', '-Dproject.build.sourceEncoding=UTF-8', 'clean', 'compile', 'war:exploded')
     & $Mvn @args1 *> $BuildLog
     if ($LASTEXITCODE -ne 0) {
         Write-Output 'build: offline build failed, retrying online'
-        $args2 = @('-B', '-DskipTests', '-Dproject.build.sourceEncoding=UTF-8', 'clean', 'package')
+        $args2 = @('-f', (Join-Path $Project 'pom.xml'), '-B', '-Dmaven.test.skip=true', '-Dproject.build.sourceEncoding=UTF-8', 'clean', 'compile', 'war:exploded')
         & $Mvn @args2 *> $BuildLog
         if ($LASTEXITCODE -ne 0) {
             Get-Content $BuildLog | Select-String '\[ERROR\]' | Select-Object -First 20 | ForEach-Object { $_.Line }

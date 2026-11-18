@@ -393,6 +393,29 @@ pre.diff span { display: block; }
 .shot-pair figcaption { color: var(--sub); font-size: 13px; margin-bottom: 4px; }
 .shot-pair img { display: block; width: 100%; height: auto; border: 1px solid var(--stroke); border-radius: 10px; }
 .shot-pair .none .desc { padding: 24px 0; text-align: center; border: 1px dashed var(--stroke-strong); border-radius: 10px; }
+.shot-link { display: block; cursor: zoom-in; }
+/* 스크린샷 크게 보기: 화면 거의 전체를 쓰는 <dialog> */
+.viewer { width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: transparent; color: #fff; overflow: hidden; }
+.viewer[open] { display: grid; grid-template-rows: auto 1fr; }
+.viewer::backdrop { background: rgba(0, 0, 0, .86); overscroll-behavior: contain; }
+.viewer:modal { overscroll-behavior: contain; }
+.viewer-bar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; min-width: 0; }
+.viewer-cap { flex: 1; min-width: 0; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-pos { color: rgba(255, 255, 255, .7); font-size: 13px; flex: none; }
+.viewer-close, .viewer-nav { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 999px; background: rgba(255, 255, 255, .14); color: #fff; cursor: pointer; }
+.viewer-close:hover, .viewer-nav:hover { background: rgba(255, 255, 255, .26); }
+.viewer-close:focus-visible, .viewer-nav:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.viewer svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+/* 원본이 작아도 화면에 꽉 차게 키운다 (비율 유지). 좌우 화살표 버튼 자리는 비워 둔다 */
+.viewer-img { justify-self: center; align-self: center; width: calc(100vw - 144px); height: calc(100dvh - 84px); margin-bottom: 16px; object-fit: contain; }
+@media (max-width: 640px) { .viewer-img { width: calc(100vw - 32px); } }
+.viewer-nav { position: fixed; top: 50%; translate: 0 -50%; }
+.viewer-nav.prev { left: 16px; }
+.viewer-nav.next { right: 16px; }
+.viewer-nav[hidden] { display: none; }
+.viewer[open] .viewer-img { animation: viewer-in .18s ease-out; }
+@keyframes viewer-in { from { opacity: 0; scale: .97; } }
+@media (prefers-reduced-motion: reduce) { .viewer[open] .viewer-img { animation: none; } }
 .card code { font-size: 12px; overflow-wrap: anywhere; }
 .theme-seg { grid-template-columns: repeat(3, 1fr); }
 .harness-gauges .gauge-box { padding: 16px 12px; }

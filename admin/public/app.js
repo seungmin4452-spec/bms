@@ -760,17 +760,65 @@
     ].join('');
   }
 
+  // 최종 커밋: 봇이 git 에서 읽어 둔 headCommit, 없으면(예전 실행) Claude 가 적은 commits 마지막 줄 앞의 해시
+  function headCommit(res) {
+    if (!res) return '';
+    if (res.headCommit) return res.headCommit;
+    const last = arr(res.commits)[arr(res.commits).length - 1];
+    const m = /^\s*`?([0-9a-f]{7,40})\b/i.exec(last || '');
+    return m ? m[1] : '';
+  }
+
   // E2E 스크린샷 변경 전/후 비교
   function shotCards(id, shots) {
     if (!shots.length) return '';
-    const img = (f, label) => (f
-      ? `<figure><figcaption>${label}</figcaption><a href="/api/runs/${id}/shots/${encodeURIComponent(f)}" target="_blank" rel="noopener"><img src="/api/runs/${id}/shots/${encodeURIComponent(f)}" alt="${esc(label)} ${esc(f)}" loading="lazy"></a></figure>`
+    // 누르면 같은 화면 위 모달(#viewer)로 크게 보여준다. href 는 남겨 두어 휠 클릭·새 탭 열기도 된다
+    const img = (f, label, name) => (f
+      ? `<figure><figcaption>${label}</figcaption><a class="shot-link" href="/api/runs/${id}/shots/${encodeURIComponent(f)}" data-cap="${esc(name)} · ${esc(label)}"><img src="/api/runs/${id}/shots/${encodeURIComponent(f)}" alt="${esc(label)} ${esc(f)}" loading="lazy"></a></figure>`
       : `<figure class="none"><figcaption>${label}</figcaption><div class="desc">없음</div></figure>`);
-    return `<section class="card"><h2>스크린샷 비교 <span class="desc">${shots.length}개 장면 · 누르면 원본 크기</span></h2>
+    return `<section class="card"><h2>스크린샷 비교 <span class="desc">${shots.length}개 장면 · 누르면 크게 보기</span></h2>
       ${shots.map(s => `<div class="shot"><div class="shot-name">${esc(s.name)}</div><div class="shot-pair">
-        ${s.only ? img(s.only, '스크린샷') : img(s.before, '변경 전') + img(s.after, '변경 후')}
+        ${s.only ? img(s.only, '스크린샷', s.name) : img(s.before, '변경 전', s.name) + img(s.after, '변경 후', s.name)}
       </div></div>`).join('')}</section>`;
   }
+
+  // ---------- 스크린샷 크게 보기 ----------
+  const viewer = document.getElementById('viewer');
+  const viewerImg = document.getElementById('viewer-img');
+  const viewerPrev = document.getElementById('viewer-prev');
+  const viewerNext = document.getElementById('viewer-next');
+  let viewerList = [];
+  let viewerAt = 0;
+  function showShot(i) {
+    if (i < 0 || i >= viewerList.length) return;
+    viewerAt = i;
+    const a = viewerList[i];
+    viewerImg.src = a.href;
+    viewerImg.alt = a.querySelector('img').alt;
+    document.getElementById('viewer-cap').textContent = a.dataset.cap || '';
+    document.getElementById('viewer-pos').textContent = viewerList.length > 1 ? `${i + 1} / ${viewerList.length}` : '';
+    viewerPrev.hidden = i === 0;
+    viewerNext.hidden = i === viewerList.length - 1;
+  }
+  view.addEventListener('click', e => {
+    const a = e.target.closest('a.shot-link');
+    if (!a || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return; // 수정키·휠 클릭은 브라우저 기본 동작(새 탭)
+    e.preventDefault();
+    viewerList = [...view.querySelectorAll('a.shot-link')];
+    showShot(viewerList.indexOf(a));
+    if (!viewer.open) viewer.showModal();
+  });
+  viewerPrev.addEventListener('click', () => showShot(viewerAt - 1));
+  viewerNext.addEventListener('click', () => showShot(viewerAt + 1));
+  viewer.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft') { e.preventDefault(); showShot(viewerAt - 1); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); showShot(viewerAt + 1); }
+  });
+  // 이미지·버튼이 아닌 곳(어두운 여백)을 누르면 닫는다. closedby 를 모르는 브라우저(Safari)도 이걸로 닫힌다
+  viewer.addEventListener('click', e => {
+    if (e.target === viewer || e.target.classList.contains('viewer-bar')) viewer.close();
+  });
+  viewer.addEventListener('close', () => { viewerImg.removeAttribute('src'); });
 
   async function detail(id) {
     view.innerHTML = `<a class="back" href="#/runs">${ICON_BACK}내역</a><section class="card"><div class="empty">불러오는 중이에요</div></section>`;
@@ -789,6 +837,7 @@
             ${r.start ? `<span class="pill-label">시작 ${esc(when(r.start))}</span>` : ''}
             <span class="pill-label">${r.start ? '종료' : '기록'} ${esc(when(r.time))}</span>
             ${durText(durMs(r)) ? `<span class="pill-label">${esc(durText(durMs(r)))} 걸림</span>` : ''}
+            ${headCommit(r.result) ? `<span class="pill-label mono" title="${esc(headCommit(r.result))}">커밋 ${esc(headCommit(r.result).slice(0, 8))}</span>` : ''}
           </div>
         </section>
         <section class="card"><h2>요약</h2><p>${esc(r.summary || '요약이 없어요')}</p></section>

@@ -48,3 +48,9 @@ model: sonnet
 - 변경 파일: `프로젝트/path:line` 목록 (새 파일은 "신규" 표시)
 - 변경 이유: 3줄 이내
 - 후속 필요 사항: SqlMap statement 요청(네임스페이스·ID·파라미터·반환 컬럼), XML 등록, DB 스크립트, 원래 미커밋이던 파일을 고쳤는지
+
+## 셸 사용 규칙 (승인 창 없는 무인 실행에서 거부되지 않도록)
+- 한 호출에 명령 하나. `cd`·`;`·`&&`·`|`·`$()`·셸 변수·`$'…'`·리다이렉트(`>`, `2>&1`)·`git -C` 를 쓰지 않는다. 경로는 절대경로로.
+- 파일 읽기·검색은 Read/Grep/Glob 도구로 한다. `sed -n`·`awk`·`node -e`·임시 파일 저장은 거부된다.
+- 변경 확인은 단일 명령으로: `git diff HEAD~1 HEAD -- <경로>`, `git show <커밋> --stat`, `git show <커밋>:<경로>`(출력 그대로 읽기), `svn diff <경로>`.
+- 자세한 허용 목록: C:/Users/SMSHIN/pigon-chat-bot/bot-shell-rules.md

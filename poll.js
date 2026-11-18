@@ -379,6 +379,9 @@ function runClaude(ticket, plan, requestFile, dir, kind, vars = {}) {
   // 진행 상황을 보려고 stream-json 으로 받아 사람이 읽는 줄로 바꿔 claude.log 와 state/progress.log 에 쓴다.
   // 원본 이벤트는 claude.stream.jsonl 에 그대로 남긴다.
   args = args.concat(['--output-format', 'stream-json', '--verbose']);
+  // 무인 실행은 승인 창이 없어 규칙 밖 셸 명령이 전부 거부되고 턴만 낭비된다 → 셸 규칙을 시스템 프롬프트에 덧붙인다
+  const shellRules = path.join(ROOT, 'bot-shell-rules.md');
+  if (fs.existsSync(shellRules)) args = args.concat(['--append-system-prompt-file', slash(shellRules)]);
   const raw = fs.openSync(path.join(dir, 'claude.stream.jsonl'), 'a');
   const human = fs.openSync(path.join(dir, 'claude.log'), 'a');
   fs.writeFileSync(PROGRESS_PATH, '');
@@ -417,8 +420,12 @@ function runClaude(ticket, plan, requestFile, dir, kind, vars = {}) {
         let ev = null;
         try { ev = JSON.parse(line); } catch (e) { emit(line.slice(0, 300)); continue; }
         describeEvent(ev, agents).forEach(emit);
-        // 결과를 낸 뒤에도 종료되지 않는 경우가 있다(E2E 로 띄운 Tomcat 이 핸들을 잡고 있을 때). 2분 기다린 뒤 강제 종료
-        if (ev.type === 'result' && !exitGuard) {
+        // 백그라운드 작업(WAS 재시작 등)을 기다리느라 턴을 끝내면 중간 result 가 나오고, 작업이 끝나면 세션이 이어진다.
+        // result 뒤에 다른 이벤트가 오면 아직 일하는 중이므로 강제 종료 예약을 취소한다.
+        if (ev.type !== 'result' && exitGuard) { clearTimeout(exitGuard); exitGuard = null; }
+        // 결과를 낸 뒤에도 종료되지 않는 경우가 있다(E2E 로 띄운 Tomcat 이 핸들을 잡고 있을 때). 2분 기다린 뒤 강제 종료.
+        // 단 봇이 result.json 을 남긴 경우(=작업 마무리)에만. 없으면 중간 result 이므로 전체 시간 제한에 맡긴다.
+        if (ev.type === 'result' && !exitGuard && fs.existsSync(path.join(dir, 'result.json'))) {
           exitGuard = setTimeout(() => {
             emit('결과 출력 후 2분 동안 종료되지 않아 강제 종료');
             try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F']); } catch (e) { /* 이미 종료 */ }
@@ -495,6 +502,16 @@ function describeEvent(ev, agents) {
   return out;
 }
 
+// 티켓 브랜치 최신 커밋 (push 직후라 origin/<브랜치> 가 맞다. 없으면 로컬 브랜치)
+function branchHead(branch) {
+  for (const ref of [`origin/${branch}`, branch]) {
+    try {
+      return execFileSync('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: CONFIG.projectDir, encoding: 'utf8', windowsHide: true }).trim();
+    } catch (e) { /* 다음 후보 */ }
+  }
+  return '';
+}
+
 function readResult(dir) {
   try {
     return JSON.parse(fs.readFileSync(path.join(dir, 'result.json'), 'utf8'));
@@ -510,6 +527,7 @@ function writeSummary(ticket, plan, result, dir, startedAt) {
     startedAt ? `  시작: ${new Date(startedAt).toISOString()}` : '',
     `  요약: ${r.summary || '(result.json 없음 — claude.log 확인)'}`,
     r.mrLink ? `  MR: ${r.mrLink}` : '',
+    r.headCommit ? `  커밋: ${r.headCommit}` : '',
     (r.questions || []).length ? `  질문: ${r.questions.join(' / ')}` : '',
     (r.notes || []).length ? `  메모: ${r.notes.join(' / ')}` : '',
     `  작업폴더: ${dir}`,
@@ -626,11 +644,20 @@ async function processTicket(no, threadName, token, state, rows, opts = {}) {
   }
 
   const status = (result.result && result.result.status) || 'no-result';
+  // push 된 티켓 브랜치의 최종 커밋을 git 에서 직접 읽어 result.json 에 남긴다 (Claude 가 적은 commits 와 별개로, 관리 웹·Chat 에 표시)
+  if (!isBatch && status === 'pushed') {
+    const head = branchHead(ticket.releaseId);
+    if (head) {
+      result.result.headCommit = head;
+      try { fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify(result.result, null, 2)); } catch (e) { log(`${tag}: result.json 커밋 기록 실패 ${e.message}`); }
+    }
+  }
+  const commitTag = result.result && result.result.headCommit ? ` · 커밋 ${result.result.headCommit.slice(0, 8)}` : '';
   writeSummary(ticket, plan, result.result, dir, startedAt);
   log(`${tag}: claude 종료코드 ${result.code}, 결과 ${status}`);
   tState.lastStatus = status;
   tState.lastRunAt = new Date().toISOString();
-  state.batchResults = (state.batchResults || []).concat(`${ticket.releaseId} ${plan.mode === 'new' ? '신규' : '추가요청'} ${STATUS_TEXT[status] || status}`);
+  state.batchResults = (state.batchResults || []).concat(`${ticket.releaseId} ${plan.mode === 'new' ? '신규' : '추가요청'} ${STATUS_TEXT[status] || status}${commitTag}`);
   // 결과는 관리 웹에서 본다. 메일은 notifyMail=true 일 때만 (기본 끔)
   if (CONFIG.notifyMail) {
     try {
@@ -664,7 +691,7 @@ async function processTicket(no, threadName, token, state, rows, opts = {}) {
     const handled = plan.mode === 'new' ? ticket.doc.testBlocks : plan.blocks;
     handled.forEach(b => tState.processedHashes.push(b.hash));
     if (CONFIG.notifyChat && threadName) {
-      await replyInThread(token, threadName, `🤖 ${ticket.releaseId} ${plan.mode === 'new' ? '신규 개발' : '추가요청 반영'} 완료 — ${status === 'pushed' ? '브랜치 push됨' : 'SVN 로컬 수정(미커밋)'}, 개발자 검토 대기`);
+      await replyInThread(token, threadName, `🤖 ${ticket.releaseId} ${plan.mode === 'new' ? '신규 개발' : '추가요청 반영'} 완료 — ${status === 'pushed' ? `브랜치 push됨${commitTag}` : 'SVN 로컬 수정(미커밋)'}, 개발자 검토 대기`);
     }
     // WEB 실행(/ticket-auto)이 result.mobile 에 모바일(PigOn) 반영 필요 여부를 판단해 둔다.
     // 필요할 때만 다음 회차에 모바일 반영을 돌린다 (폴링 1회당 Claude 1건 원칙). 판단이 없으면 모바일 실행에서 다시 판단한다

@@ -90,7 +90,10 @@ function minutesOf(iso) {
   return m ? Number(m[1] || 0) * 60 + Number(m[2] || 0) : null;
 }
 
-const RESULT_TEXT = { 0: '정상 종료', 267009: '실행 중', 267011: '아직 실행한 적 없음', 3221225786: '강제 종료됨' };
+// 0x800710E0: 중복 실행 정책(IgnoreNew)으로 이전 실행이 아직 진행 중이라 이번 회차를 건너뜀 — 오류 아님
+const SKIPPED_BUSY = 0x800710E0;
+const RESULT_TEXT = { 0: '정상 종료', 267009: '실행 중', 267011: '아직 실행한 적 없음', 3221225786: '강제 종료됨', [SKIPPED_BUSY]: '이전 실행이 진행 중이라 이번 회차는 건너뜀' };
+const OK_RESULTS = [0, 267009, 267011, SKIPPED_BUSY];
 
 let taskCache = null;
 async function getTask(force) {
@@ -213,7 +216,7 @@ async function getStatus() {
   const runs = loadRuns();
   const warnings = [];
   if (lock.exists && !lock.alive) warnings.push('봇이 실행 도중 멈춘 흔적(lock 파일)이 남아 있어요. 다음 실행 때 봇이 스스로 정리해요.');
-  if (![0, 267009, 267011].includes(task.lastResult)) warnings.push(`마지막 실행이 비정상 종료됐어요. (${task.lastResultText})`);
+  if (!OK_RESULTS.includes(task.lastResult)) warnings.push(`마지막 실행이 비정상 종료됐어요. (${task.lastResultText})`);
 
   let state = 'idle';
   if (lock.alive) state = 'running';
