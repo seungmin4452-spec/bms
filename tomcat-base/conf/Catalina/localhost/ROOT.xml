@@ -1,0 +1,6 @@
+<Context path="" docBase="C:\Users\SMSHIN\IdeaProjects\pigon_pc\target\pigon_pc">
+  <Parameter name="log4jConfigLocation" value="classpath:log4j/local.properties" override="false" />
+  <JarScanner>
+    <JarScanFilter tldSkip="poi*.jar,xmlbeans*.jar,jackson-*.jar,ojdbc*.jar,postgresql-*.jar,sqljdbc*.jar,p6spy-*.jar,chartfx*.jar,softwarefx*.jar,cglib*.jar,aspectjweaver*.jar,bcprov*.jar,bctls*.jar,bcutil*.jar,gson*.jar,okhttp*.jar,okio*.jar,jai_*.jar,commons-net*.jar,aether-*.jar,activation*.jar,aopalliance*.jar,jsoup*.jar,json-*.jar,curvesapi*.jar,ibatis-sqlmap*.jar,stax-api*.jar,jsr250-api*.jar,MarkCore.jar,nets-nsso*.jar,sapjco3.jar,kit-*.jar,open-csv*.jar" pluggabilitySkip="poi*.jar,xmlbeans*.jar,jackson-*.jar,ojdbc*.jar,postgresql-*.jar,sqljdbc*.jar,p6spy-*.jar,chartfx*.jar,softwarefx*.jar,cglib*.jar,aspectjweaver*.jar,bcprov*.jar,bctls*.jar,bcutil*.jar,gson*.jar,okhttp*.jar,okio*.jar,jai_*.jar,commons-net*.jar,aether-*.jar,activation*.jar,aopalliance*.jar,jsoup*.jar,json-*.jar,curvesapi*.jar,ibatis-sqlmap*.jar,stax-api*.jar,jsr250-api*.jar,MarkCore.jar,nets-nsso*.jar,sapjco3.jar,kit-*.jar,open-csv*.jar" />
+  </JarScanner>
+</Context>

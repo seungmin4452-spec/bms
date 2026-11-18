@@ -1,0 +1,21 @@
+{
+  "spaceId": "YOUR_GOOGLE_CHAT_SPACE_ID",
+  "developerName": "YOUR_NAME",
+  "projectDir": "C:/Users/SMSHIN/IdeaProjects/pigon_pc",
+  "dryRun": false,
+  "notifyChat": false,
+  "notifyMail": false,
+  "claude": {
+    "cmd": "claude.cmd",
+    "args": ["-p", "--permission-mode", "acceptEdits", "--settings", "C:/Users/SMSHIN/pigon-chat-bot/bot-settings.json", "--add-dir", "C:/Users/SMSHIN/pigon-chat-bot/runs"],
+    "timeoutMinutes": 180,
+    "promptTemplate": "/ticket-auto {releaseId} {mode} {requestFile}"
+  },
+  "batch": {
+    "projectDirs": [
+      "C:/Users/SMSHIN/IdeaProjects/PIGON_GRP_AGENT_REPL",
+      "C:/Users/SMSHIN/IdeaProjects/PIGON_GRP_AGENT_CONT"
+    ],
+    "promptFile": "batch-prompt.md"
+  }
+}

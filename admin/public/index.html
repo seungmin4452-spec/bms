@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="admin-token" content="__TOKEN__">
+<title>개발 봇 관리</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-in">
+    <h1>개발 봇</h1>
+    <nav class="tabs" id="tabs">
+      <a href="#/" data-tab="home">홈</a>
+      <a href="#/runs" data-tab="runs">내역</a>
+      <a href="#/harness" data-tab="harness">하네스</a>
+      <a href="#/settings" data-tab="settings">설정</a>
+    </nav>
+  </div>
+</header>
+<main class="wrap" id="view"></main>
+<div class="sheet-dim" id="sheet" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <h2 id="sheet-title"></h2>
+    <p id="sheet-desc"></p>
+    <div class="sheet-btns">
+      <button class="btn sub" id="sheet-cancel">닫기</button>
+      <button class="btn main" id="sheet-ok"></button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,102 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Agent",
+      "Skill",
+      "TodoWrite",
+      "Read(//c/Users/SMSHIN/pigon-chat-bot/runs/**)",
+      "Edit(//c/Users/SMSHIN/pigon-chat-bot/runs/**)",
+
+      "Bash(git status*)",
+      "Bash(git fetch*)",
+      "Bash(git switch *)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git show*)",
+      "Bash(git branch*)",
+      "Bash(git rev-parse*)",
+      "Bash(git ls-remote*)",
+      "Bash(git grep*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git merge --ff-only *)",
+      "Bash(git stash push *)",
+      "Bash(git restore --staged *)",
+      "Bash(git push -u origin *)",
+      "Bash(npx playwright test *)",
+      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -File C:/Users/SMSHIN/pigon-chat-bot/was.ps1 *)",
+      "Bash(cd *)",
+      "Bash(ls*)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(grep *)",
+      "Bash(find *)",
+      "Bash(wc *)",
+      "Bash(sort *)",
+      "Bash(uniq *)",
+      "Bash(svn status*)",
+      "Bash(svn diff*)",
+      "Bash(svn info*)",
+      "Bash(svn log*)",
+      "Bash(svn add *)",
+      "Bash(javac *)",
+      "PowerShell(svn status*)",
+      "PowerShell(svn diff*)",
+      "PowerShell(svn info*)",
+      "PowerShell(svn log*)",
+      "PowerShell(svn add *)",
+      "PowerShell(javac *)",
+
+      "PowerShell(git status*)",
+      "PowerShell(git fetch*)",
+      "PowerShell(git switch *)",
+      "PowerShell(git log*)",
+      "PowerShell(git diff*)",
+      "PowerShell(git show*)",
+      "PowerShell(git branch*)",
+      "PowerShell(git rev-parse*)",
+      "PowerShell(git ls-remote*)",
+      "PowerShell(git grep*)",
+      "PowerShell(git add *)",
+      "PowerShell(git commit *)",
+      "PowerShell(git merge --ff-only *)",
+      "PowerShell(git stash push *)",
+      "PowerShell(git restore --staged *)",
+      "PowerShell(git push -u origin *)",
+      "PowerShell(npx playwright test *)",
+      "PowerShell(powershell -NoProfile -ExecutionPolicy Bypass -File C:/Users/SMSHIN/pigon-chat-bot/was.ps1 *)",
+      "PowerShell(& C:/Users/SMSHIN/pigon-chat-bot/was.ps1 *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(Get-Content *)",
+      "PowerShell(Select-String *)"
+    ],
+    "deny": [
+      "Read(**/*.pem)",
+      "Bash(git push --force*)",
+      "Bash(git push -f *)",
+      "PowerShell(git push --force*)",
+      "PowerShell(git push -f *)",
+      "EnterWorktree",
+      "WebFetch",
+      "WebSearch"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/Users/SMSHIN/pigon-chat-bot/bot-guard.js\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
