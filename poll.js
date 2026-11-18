@@ -200,6 +200,23 @@ function changedSince(before, after) {
     .map(k => ({ file: k, status: label[after[k].code[0]] || after[k].code, preModified: !!before[k] && before[k].code !== '?' }));
 }
 
+// ---------- 서브에이전트 ----------
+// BATCH·모바일용 서브에이전트 정의는 봇 저장소 agents/<kind>/*.md 에 둔다(git 으로 관리).
+// Claude 는 실행 폴더(cwd)의 .claude/agents/ 만 읽으므로, 실행 직전에 그곳으로 복사한다. (svnSnapshot 보다 먼저 호출해 변경 파일에 섞이지 않게)
+// 같은 이름 파일만 덮어쓰고, 개발자가 따로 둔 에이전트 파일은 건드리지 않는다.
+function syncAgents(kind, cwd) {
+  const src = path.join(ROOT, 'agents', kind);
+  if (!fs.existsSync(src)) return [];
+  const dest = path.join(cwd, '.claude', 'agents');
+  fs.mkdirSync(dest, { recursive: true });
+  return fs.readdirSync(src).filter(f => f.endsWith('.md')).map(f => {
+    const body = fs.readFileSync(path.join(src, f));
+    const to = path.join(dest, f);
+    if (!fs.existsSync(to) || !fs.readFileSync(to).equals(body)) fs.writeFileSync(to, body);
+    return f.slice(0, -3);
+  });
+}
+
 // ---------- 분기 판단 ----------
 function decide(ticket, tState, isBatch) {
   const doc = ticket.doc;
@@ -584,6 +601,7 @@ async function processTicket(no, threadName, token, state, rows, opts = {}) {
     }
   }
 
+  if (isBatch) log(`${tag}: 서브에이전트 준비 ${syncAgents('batch', CONFIG.batch.projectDirs[0]).join(', ') || '(없음)'}`);
   const before = isBatch ? svnSnapshot(CONFIG.batch.projectDirs) : null;
   const startedAt = Date.now();
   const dir = path.join(RUN_DIR, ticket.releaseId, `${stamp()}-${plan.mode}`);
@@ -712,6 +730,7 @@ async function runMobile(ticket, tag, tState, threadName, token, state) {
   if (claudeRan) { log(`${tag}: 이번 회차에 이미 1건 실행함 → 모바일(PigOn) 반영은 다음 폴링으로`); return 'queued'; }
   ticket.releaseId = job.releaseId;
   const dirs = [CONFIG.mobile.projectDir];
+  log(`${tag}: 서브에이전트 준비 ${syncAgents('mobile', CONFIG.mobile.projectDir).join(', ') || '(없음)'}`);
   const before = svnSnapshot(dirs);
   const startedAt = Date.now();
   const dir = path.join(RUN_DIR, job.releaseId, `${stamp()}-${job.mode}-mobile`);

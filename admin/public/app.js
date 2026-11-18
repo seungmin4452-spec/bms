@@ -860,6 +860,106 @@
     card.querySelectorAll('[data-scheme]').forEach(b => { b.onclick = () => setScheme(b.dataset.scheme); });
   }
 
+  // ---------- 동작 원리 ----------
+  // poll.js 한 회차가 하는 일을 그림으로 보여준다. 내용은 코드 기준으로 손으로 적은 것이라,
+  // poll.js 흐름(대상 조건·분기·결과 처리)을 바꾸면 여기도 같이 고친다.
+  async function flow() {
+    const g = gen;
+    let every = '정해진 간격';
+    try { every = `${(await api('GET', '/api/schedule')).intervalMinutes}분`; } catch (e) { /* 간격 없이 그린다 */ }
+    if (g !== gen) return;
+    const li = xs => `<ul class="fx-list">${xs.map(x => `<li>${x}</li>`).join('')}</ul>`;
+    const steps = [
+      ['깨어나기', `작업 스케줄러가 <b>${esc(every)}마다</b> <code>poll.js</code> 실행`, ['lock 으로 중복 실행 막기', '이전 실행이 강제 종료됐으면 알림']],
+      ['일감 모으기', 'Google Chat 알림 + 작업 목록', ['요청단계 <b>개발 요청</b> 알림의 번호', '지난 회차에 남은 일감', '처리했던 일감 전체 (추가요청 확인용)']],
+      ['대상 고르기', '시트 <b>이력관리</b> 행을 다시 읽음', ['PIGON · WEB 또는 BATCH', '개발담당자가 나', 'P열 알림 <b>O</b> · S열 알림 <b>X</b>']],
+      ['신규 / 보완 판단', '변경요청 문서를 읽고 모드 결정', ['브랜치 없음 → <b>신규</b>', '3. 테스트에 새 블록 → <b>보완</b>', '새 내용 없음 → 건너뜀']],
+      ['요청서 만들기', '<code>runs/&lt;브랜치&gt;/&lt;시각&gt;-&lt;모드&gt;/</code>', ['첨부 이미지 내려받기', '링크된 Drive·문서 파일 내려받기', '<code>request.md</code> 작성']],
+      ['Claude 실행', '<code>claude -p</code> 오케스트레이터', ['작으면 직접, 크면 담당 에이전트에 <b>병렬 위임</b>', '리뷰 에이전트는 항상', '회차당 <b>1건</b>만, 최대 3시간']],
+      ['결과 처리', '<code>result.json</code> 상태로 다음 행동 결정', ['스크린샷·변경 파일 보관', 'Chat 으로 알림', '모두 끝나면 완료 알림']],
+    ];
+    const lanes = [
+      ['WEB', 'accent', [['프로젝트', 'pigon_pc (git)'], ['지침', '<code>/ticket-auto</code>'], ['에이전트', 'backend · dba · jsp · e2e · ozreport · reviewer'], ['검증', '빌드 · Tomcat · E2E 스크린샷'], ['끝', '티켓 브랜치 <b>push</b>']], '모바일에도 필요하면 다음 회차에 ↓'],
+      ['MOBILE', 'good', [['프로젝트', 'PigOn (SVN)'], ['지침', '<code>mobile-prompt.md</code>'], ['에이전트', 'mobile-backend · sqlmap · jsp · reviewer'], ['입력', '웹 diff + 웹 실행 결과'], ['끝', '로컬 수정까지 (커밋은 개발자)']], 'WEB 반영이 끝난 뒤에만'],
+      ['BATCH', 'warn', [['프로젝트', 'AGENT_REPL · CONT · API (SVN)'], ['지침', '<code>batch-prompt.md</code>'], ['에이전트', 'batch-java · sqlmap · reviewer'], ['검증', '컴파일 확인'], ['끝', '로컬 수정까지 (커밋은 개발자)']], '고칠 프로젝트는 Claude 가 코드로 판단'],
+    ];
+    const results = [
+      ['good', '완료', 'pushed · modified', '처리한 블록을 기록하고 끝. WEB 이면 모바일 반영 여부 확인'],
+      ['', '해당 없음', 'unchanged', '모바일에 같은 기능이 없거나 영향 없음'],
+      ['warn', '확인 필요', 'blocked', '구현 전에 멈추고 질문을 Chat 으로 보냄 → 문서 3. 테스트에 답하면 이어서'],
+      ['bad', '실패', 'failed · no-result', '다음 회차에 1번 더. 2번 실패하면 문서가 바뀔 때까지 대기'],
+    ];
+    const guards = [
+      ['중복 실행 방지', 'lock 파일의 PID 가 살아 있으면 이번 회차는 쉼. 8시간 넘으면 멈춘 것으로 봄'],
+      ['사람 작업과 안 겹치게', 'WEB 은 실행 전 git merge·rebase 중, 미커밋 변경, 20010 포트 사용 중이면 보류'],
+      ['위험한 명령 차단', '<code>bot-guard.js</code>: reset --hard·rebase·브랜치 삭제·svn commit 등 금지, push 는 티켓 브랜치만'],
+      ['같은 질문 반복 안 함', '확인 요청·실패 뒤에는 변경요청 문서가 바뀔 때까지 기다림'],
+      ['시간 제한', 'Claude 실행 최대 3시간, 결과를 낸 뒤 2분 안에 안 끝나면 강제 종료'],
+      ['알림 폭주 방지', '같은 오류 알림은 6시간에 한 번만'],
+    ];
+    const files = [
+      ['poll.js', '폴링 · 분기 · 실행 · 결과 처리 (중심)'],
+      ['ticket.js', '시트 행 · 변경요청 문서 읽기'],
+      ['notify.js', 'Chat 웹훅 알림 카드'],
+      ['bot-guard.js', '명령 차단 훅'],
+      ['batch-prompt.md', 'BATCH 작업 지침'],
+      ['mobile-prompt.md', '모바일 반영 지침'],
+      ['agents/', 'BATCH·모바일 서브에이전트 (실행 전 프로젝트로 복사)'],
+      ['was.ps1', '봇 전용 Tomcat 빌드·기동'],
+      ['admin/', '지금 보고 있는 관리 웹'],
+    ];
+    view.innerHTML = `
+      <section class="card">
+        <div class="card-head"><div><h2>한 번의 폴링</h2><span class="desc">${esc(every)}마다 아래 순서를 한 번 돌아요. 일감마다 2~7을 반복해요.</span></div></div>
+        <ol class="fx-steps">${steps.map(([t, s, xs], i) => `
+          <li class="fx-step">
+            <span class="fx-num" aria-hidden="true">${i + 1}</span>
+            <h3>${t}</h3>
+            <p class="fx-sub">${s}</p>
+            ${li(xs)}
+          </li>`).join('')}</ol>
+      </section>
+      <div class="bento mt16">
+        <section class="card span-12">
+          <div class="card-head"><div><h2>일감 종류별 경로</h2><span class="desc">시트의 서비스 구분(WEB · BATCH)에 따라 다른 프로젝트와 지침을 써요. 경로마다 그 프로젝트 전용 에이전트가 있어요.</span></div></div>
+          <div class="fx-lanes">${lanes.map(([name, tone, rows, foot]) => `
+            <div class="fx-lane fx-${tone}">
+              <div class="fx-lane-name">${name}</div>
+              ${rows.map(([k, v]) => `<div class="kv"><span>${k}</span><b>${v}</b></div>`).join('')}
+              <p class="fx-lane-foot">${foot}</p>
+            </div>`).join('')}</div>
+        </section>
+        <section class="card span-6 stretch">
+          <h2>신규인지 보완인지</h2>
+          <div class="fx-tree">
+            <div class="fx-q">티켓 브랜치가 origin 에 있거나, 이미 신규를 끝냈나?</div>
+            <div class="fx-branches">
+              <div class="fx-a"><span class="badge">아니오</span><b>신규</b><p>1. 요청사항 + 링크 파일 기준으로 구현. 앞서 질문했다면 3. 테스트의 답도 함께 넘김</p></div>
+              <div class="fx-a"><span class="badge">예</span><b>보완</b><p>3. 테스트 칸에서 아직 처리 안 한 블록만 반영. 없으면 건너뜀</p></div>
+            </div>
+            <p class="desc mt8">블록마다 내용 해시를 저장해서 같은 요청을 두 번 처리하지 않아요. BATCH 는 브랜치가 없어서 기록만 봐요.</p>
+          </div>
+        </section>
+        <section class="card span-6 stretch">
+          <h2>결과에 따라</h2>
+          <div class="fx-results">${results.map(([tone, label, code, desc]) => `
+            <div class="fx-result">
+              <span class="badge ${tone}">${label}</span>
+              <div><code>${code}</code><p>${desc}</p></div>
+            </div>`).join('')}</div>
+        </section>
+        <section class="card span-8">
+          <h2>안전장치</h2>
+          <div class="fx-guards">${guards.map(([t, d]) => `<div class="fx-guard"><b>${t}</b><p>${d}</p></div>`).join('')}</div>
+        </section>
+        <section class="card span-4 fx-files">
+          <h2>파일 지도</h2>
+          ${files.map(([f, d]) => `<div class="kv"><span><code>${f}</code></span><b>${d}</b></div>`).join('')}
+        </section>
+      </div>`;
+    playEnter();
+  }
+
   // ---------- 하네스 ----------
   const pctNum = r => (r && r.total ? Math.round(r.done / r.total * 100) : null);
   const pct = r => (pctNum(r) == null ? '-' : `${pctNum(r)}%`);
@@ -1170,7 +1270,7 @@
     const h = location.hash.replace(/^#/, '') || '/';
     const m = /^\/runs\/(\d+)$/.exec(h);
     const e = /^\/harness\/([a-z-]+)$/.exec(h);
-    const tab = h === '/' ? 'home' : h.startsWith('/runs') ? 'runs' : h.startsWith('/harness') ? 'harness' : 'settings';
+    const tab = h === '/' ? 'home' : h.startsWith('/runs') ? 'runs' : h.startsWith('/harness') ? 'harness' : h === '/flow' ? 'flow' : 'settings';
     document.querySelectorAll('#tabs a[data-tab]').forEach(a => {
       if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     });
@@ -1182,6 +1282,7 @@
     else if (h === '/runs') runs();
     else if (h === '/harness') harness();
     else if (h === '/settings') settings();
+    else if (h === '/flow') flow();
     else home();
   }
   window.addEventListener('hashchange', route);
