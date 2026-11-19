@@ -373,6 +373,13 @@ pre.log { margin: 0; padding: 14px; border-radius: 14px; background: var(--log-b
 .ai-summary { margin: 16px 0 4px !important; color: var(--text) !important; }
 .suggest { margin-top: 12px; padding: 16px; border-radius: 12px; background: var(--tile); border: 1px solid var(--stroke); }
 .suggest p { margin: 4px 0 12px; font-size: 14px; }
+.pick { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 13px; font-weight: 600; color: var(--text); cursor: pointer; }
+.pick input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.pick input:disabled, .pick:has(input:disabled) { cursor: default; opacity: .6; }
+.batch-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.batch-head .pick { margin: 0; }
+.batch-head .row-sub { margin-left: auto; }
+.suggest pre.diff { margin: 12px 0 0; max-height: 360px; overflow: auto; }
 .ask { display: flex; gap: 8px; align-items: flex-end; margin-top: 16px; }
 .ask textarea { flex: 1; min-width: 0; padding: 12px 14px; border: 1px solid var(--stroke); border-radius: 14px; background: var(--tile); color: var(--text); font: inherit; resize: vertical; }
 .ask textarea::placeholder { color: var(--sub); }

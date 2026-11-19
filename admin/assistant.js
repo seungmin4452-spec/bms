@@ -11,6 +11,7 @@ const { spawn } = require('child_process');
 const COMMAND = 'claude -p --tools "" --disable-slash-commands --strict-mcp-config --no-session-persistence --output-format json';
 const TIMEOUT_MS = 4 * 60 * 1000;
 const MAX_REQUEST = 2000;
+const MAX_REQUESTS = 5;
 
 function fail(status, message) {
   const e = new Error(message);
@@ -81,8 +82,12 @@ module.exports = function createAssistant({ loadRuns, isDone, harness }) {
   function propose(id, request, text) {
     return exclusive(async () => {
       const file = harness.readFile(id); // 없는 항목이면 여기서 404
-      if (typeof request !== 'string' || !request.trim()) throw fail(400, '어떻게 고칠지 적어 주세요.');
-      if (request.length > MAX_REQUEST) throw fail(400, `요청은 ${MAX_REQUEST}자까지 적을 수 있어요.`);
+      // 진단 제안 여러 개를 한 파일에 한꺼번에 반영할 때는 요청을 배열로 받는다
+      const list = Array.isArray(request) ? request : [request];
+      if (!list.length || list.length > MAX_REQUESTS) throw fail(400, `요청은 한 번에 ${MAX_REQUESTS}개까지 보낼 수 있어요.`);
+      if (list.some(r => typeof r !== 'string' || !r.trim())) throw fail(400, '어떻게 고칠지 적어 주세요.');
+      if (list.some(r => r.length > MAX_REQUEST)) throw fail(400, `요청은 ${MAX_REQUEST}자까지 적을 수 있어요.`);
+      const asked = list.length === 1 ? list[0].trim() : list.map((r, i) => `${i + 1}. ${r.trim()}`).join('\n\n');
       if (typeof text !== 'string' || !text.trim()) throw fail(400, '고칠 내용이 비어 있어요.');
       if (Buffer.byteLength(text) > harness.MAX_BYTES) throw fail(400, '내용이 너무 길어요.');
       const current = text.replace(/\r\n/g, '\n');
@@ -93,6 +98,7 @@ module.exports = function createAssistant({ loadRuns, isDone, harness }) {
         '<request> 에 적힌 대로 <file> 을 고쳐라.',
         '',
         '규칙:',
+        '- <request> 에 번호 매긴 요청이 여러 개면 모두 반영한다. 서로 부딪히면 앞 번호를 따르고 설명에 적는다.',
         '- 요청과 관계없는 부분은 한 글자도 바꾸지 않는다. 줄 순서, 들여쓰기, 빈 줄도 그대로 둔다.',
         `- ${KIND_RULE[file.kind]}`,
         '- {releaseId} 같은 중괄호 자리표시는 봇이 값을 채우는 자리다. 지우거나 이름을 바꾸지 않는다.',
@@ -110,7 +116,7 @@ module.exports = function createAssistant({ loadRuns, isDone, harness }) {
         '</runs>',
         '',
         '<request>',
-        request.trim(),
+        asked,
         '</request>',
         '',
         '<file>',

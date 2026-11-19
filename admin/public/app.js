@@ -1108,13 +1108,99 @@
   }
 
   // Claude 진단: 탭을 오가도 결과와 진행 상태가 남도록 화면 밖에 둔다
-  const ai = { busy: false, result: null, error: '' };
+  // batch: 고른 제안을 파일별로 묶어 한꺼번에 고친 결과. 저장은 사람이 diff 를 보고 누른다
+  const ai = { busy: false, result: null, error: '', picked: new Set(), batch: null };
   let handoff = null; // 진단 제안을 편집기로 넘길 때 쓰는 수정 요청문
+
+  function drawBatch() {
+    const b = ai.batch;
+    if (!b) return '';
+    if (b.running) return `<div class="notice info"><b>선택한 제안을 반영하고 있어요 (${b.step}/${b.total})</b><p>${esc(b.label)} 고치는 중이에요. 파일마다 30초쯤 걸려요. 저장은 직접 눌러야 돼요.</p></div>`;
+    const savable = b.items.filter(it => it.save && !it.saved);
+    return `
+      <div class="opt-title mt16">반영 결과</div>
+      ${b.items.map((it, k) => {
+        const d = it.changed ? lineDelta(it.original, it.text) : null;
+        const ops = it.changed ? diffLines(it.original, it.text) : null;
+        const ok = it.changed && !it.problem && !it.error;
+        return `
+          <div class="suggest">
+            <div class="batch-head">
+              ${ok && !it.saved ? `<label class="pick"><input type="checkbox" data-save="${k}" ${it.save ? 'checked' : ''} ${b.saving ? 'disabled' : ''}> 저장</label>` : ''}
+              <div class="opt-title">${esc(it.label)}</div>
+              <span class="row-sub">${it.saved ? '저장했어요' : it.error ? '실패' : !it.changed ? '바뀐 것 없음' : `${d.added}줄 추가, ${d.removed}줄 삭제`}</span>
+            </div>
+            <div class="row-sub">반영한 제안: ${it.titles.map(esc).join(', ')}</div>
+            ${it.explanation ? `<p>${esc(it.explanation)}</p>` : ''}
+            ${it.error ? `<div class="notice">${esc(it.error)}</div>` : ''}
+            ${it.problem ? `<div class="notice">이대로는 저장할 수 없어요. ${esc(it.problem)}</div>` : ''}
+            ${it.saveError ? `<div class="notice">${esc(it.saveError)}</div>` : ''}
+            ${ops ? `<pre class="log diff">${ops.map(([t, l]) => (t === '…' ? '<span class="d-skip">⋯</span>' : `<span class="${t === '+' ? 'd-add' : t === '-' ? 'd-del' : ''}">${t} ${esc(l)}</span>`)).join('')}</pre>` : ''}
+          </div>`;
+      }).join('')}
+      <div class="hero-actions">
+        ${savable.length ? `<button class="btn main" id="batch-save" ${b.saving ? 'disabled' : ''}>${b.saving ? '저장하는 중이에요…' : `선택한 ${savable.length}개 파일 저장하기`}</button>` : ''}
+        <button class="btn sub" id="batch-close" ${b.saving ? 'disabled' : ''}>${savable.length ? '저장하지 않고 닫기' : '닫기'}</button>
+      </div>`;
+  }
+
+  async function runBatch() {
+    const r = ai.result;
+    const groups = new Map(); // 같은 파일 제안은 한 번에 고친다
+    [...ai.picked].sort((x, y) => x - y).forEach(i => {
+      const s = r.suggestions[i];
+      if (!groups.has(s.file)) groups.set(s.file, { id: s.file, label: s.label, requests: [], titles: [] });
+      groups.get(s.file).requests.push(s.request);
+      groups.get(s.file).titles.push(s.title);
+    });
+    const list = [...groups.values()];
+    const b = ai.batch = { running: true, step: 0, total: list.length, label: '', items: [], saving: false };
+    for (const gr of list) {
+      b.step++; b.label = gr.label;
+      drawDiagnosis();
+      const it = { id: gr.id, label: gr.label, titles: gr.titles, original: '', text: '', hash: '', changed: false, save: false };
+      try {
+        const f = await api('GET', `/api/harness/file/${gr.id}`);
+        it.original = f.text.replace(/\r\n/g, '\n');
+        it.hash = f.hash;
+        const p = await api('POST', '/api/harness/ai/propose', { id: gr.id, request: gr.requests, text: f.text });
+        Object.assign(it, { text: p.text, explanation: p.explanation, changed: p.changed, problem: p.problem });
+        it.save = p.changed && !p.problem;
+      } catch (e) { it.error = e.message; }
+      b.items.push(it);
+    }
+    b.running = false;
+    drawDiagnosis();
+    if (!document.getElementById('ai-card')) toast('선택한 제안을 반영했어요. 하네스 탭에서 확인하고 저장해 주세요');
+  }
+
+  async function saveBatch() {
+    const b = ai.batch;
+    const todo = b.items.filter(it => it.save && !it.saved);
+    if (!todo.length) return;
+    const sum = todo.reduce((a, it) => { const d = lineDelta(it.original, it.text); return { added: a.added + d.added, removed: a.removed + d.removed }; }, { added: 0, removed: 0 });
+    if (!await confirmSheet(`${todo.length}개 파일을 저장할까요?`, `${todo.map(it => it.label).join(', ')}에서 모두 ${sum.added}줄을 더하고 ${sum.removed}줄을 뺐어요. 다음 실행부터 적용되고, 변경 기록에서 하나씩 되돌릴 수 있어요.`, '모두 저장하기')) return;
+    b.saving = true;
+    drawDiagnosis();
+    let saved = 0;
+    for (const it of todo) {
+      it.saveError = '';
+      try {
+        await api('PUT', `/api/harness/file/${it.id}`, { text: it.text, baseHash: it.hash });
+        it.saved = true; saved++;
+      } catch (e) { it.saveError = e.message; }
+    }
+    b.saving = false;
+    toast(saved === todo.length ? `${saved}개 파일을 저장했어요` : `${todo.length}개 중 ${saved}개만 저장했어요`);
+    if (location.hash === '#/harness') harness(); else drawDiagnosis(); // 변경 기록·완료율을 새로 불러온다
+  }
 
   function drawDiagnosis() {
     const card = document.getElementById('ai-card');
     if (!card) return;
     const r = ai.result;
+    const b = ai.batch;
+    const locked = ai.busy || (b && (b.running || b.saving));
     card.innerHTML = `
       <h2>Claude와 함께 고치기</h2>
       <p class="desc">Claude가 최근 실행 기록과 지금 하네스를 읽고, 어디를 고치면 좋을지 알려줘요. 1분쯤 걸려요.</p>
@@ -1123,21 +1209,52 @@
         <p class="ai-summary">${esc(r.summary)}</p>
         ${r.suggestions.map((s, i) => `
           <div class="suggest">
+            <label class="pick"><input type="checkbox" data-pick="${i}" ${ai.picked.has(i) ? 'checked' : ''} ${locked || b ? 'disabled' : ''}> 반영하기</label>
             <div class="row-sub">${esc(s.label)}</div>
             <div class="opt-title">${esc(s.title)}</div>
             <p>${esc(s.reason)}</p>
-            <button class="btn soft small" data-go="${i}">이 제안으로 고치기</button>
+            <button class="btn sub small" data-go="${i}" ${locked ? 'disabled' : ''}>편집기에서 따로 고치기</button>
           </div>`).join('') || '<p class="desc">하네스에서 고칠 곳을 찾지 못했어요.</p>'}
+        ${r.suggestions.length && !b ? `<div class="hero-actions"><button class="btn main" id="apply-picked" ${locked || !ai.picked.size ? 'disabled' : ''}>${ai.picked.size ? `선택한 ${ai.picked.size}개 한번에 반영하기` : '반영할 제안을 골라 주세요'}</button></div>` : ''}
+        ${drawBatch()}
         ${r.notHarness.length ? `<div class="opt-title mt16">하네스로는 못 고치는 것</div><ul>${r.notHarness.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
         <p class="desc mt16">${esc(when(r.time))}에 살펴봤어요.</p>` : ''}
-      <div class="hero-actions"><button class="btn ${r ? 'sub' : 'main'}" id="diagnose" ${ai.busy ? 'disabled' : ''}>${ai.busy ? 'Claude가 살펴보는 중이에요…' : r ? '다시 살펴보기' : '개선할 곳 찾기'}</button></div>`;
+      <div class="hero-actions"><button class="btn ${r ? 'sub' : 'main'}" id="diagnose" ${locked ? 'disabled' : ''}>${ai.busy ? 'Claude가 살펴보는 중이에요…' : r ? '다시 살펴보기' : '개선할 곳 찾기'}</button></div>`;
     document.getElementById('diagnose').onclick = async () => {
-      ai.busy = true; ai.error = '';
+      if (ai.batch && ai.batch.items.some(it => it.save && !it.saved)
+        && !await confirmSheet('반영 결과를 버릴까요?', '아직 저장하지 않은 수정이 있어요. 다시 살펴보면 사라져요.', '버리고 살펴보기')) return;
+      ai.busy = true; ai.error = ''; ai.batch = null;
       drawDiagnosis();
-      try { ai.result = await api('POST', '/api/harness/ai/diagnose'); } catch (e) { ai.error = e.message; }
+      try {
+        ai.result = await api('POST', '/api/harness/ai/diagnose');
+        ai.picked = new Set(ai.result.suggestions.map((s, i) => i)); // 처음에는 모두 고른 상태
+      } catch (e) { ai.error = e.message; }
       ai.busy = false;
       drawDiagnosis();
       if (!document.getElementById('ai-card')) toast(ai.error || 'Claude가 진단을 끝냈어요');
+    };
+    card.querySelectorAll('[data-pick]').forEach(c => {
+      c.onchange = () => {
+        const i = Number(c.dataset.pick);
+        if (c.checked) ai.picked.add(i); else ai.picked.delete(i);
+        drawDiagnosis();
+        const again = card.querySelector(`[data-pick="${i}"]`);
+        if (again) again.focus();
+      };
+    });
+    card.querySelectorAll('[data-save]').forEach(c => {
+      c.onchange = () => { ai.batch.items[Number(c.dataset.save)].save = c.checked; drawDiagnosis(); const again = card.querySelector(`[data-save="${c.dataset.save}"]`); if (again) again.focus(); };
+    });
+    const applyBtn = document.getElementById('apply-picked');
+    if (applyBtn) applyBtn.onclick = () => runBatch();
+    const saveBtn = document.getElementById('batch-save');
+    if (saveBtn) saveBtn.onclick = () => saveBatch();
+    const closeBtn = document.getElementById('batch-close');
+    if (closeBtn) closeBtn.onclick = async () => {
+      if (ai.batch.items.some(it => it.save && !it.saved)
+        && !await confirmSheet('반영 결과를 버릴까요?', '저장하지 않은 수정은 사라져요. 제안은 다시 골라서 반영할 수 있어요.', '버리기')) return;
+      ai.batch = null;
+      drawDiagnosis();
     };
     card.querySelectorAll('[data-go]').forEach(b => {
       b.onclick = () => {
