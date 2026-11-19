@@ -51,6 +51,7 @@ function buildMail(ticket, plan, r, dir) {
     ${ticket.branchDerived && ticket.service !== 'BATCH' ? `<div style="font-size:13px;color:#9a6700">릴리즈노트 미작성 → 브랜치 <code>${esc(ticket.releaseId)}</code> 는 변경요청 ID 기준으로 생성. 시트 J열에 같은 ID로 릴리즈노트를 작성하세요.</div>` : ''}
     <h2 style="margin:6px 0 10px;font-size:18px"><span style="color:${st.color}">[${esc(st.label)}]</span> ${esc(ticket.releaseId)} ${esc(ticket.title)}</h2>
     ${r.mrLink ? `<p><a href="${esc(r.mrLink)}" style="background:#0969da;color:#fff;padding:7px 14px;border-radius:6px;text-decoration:none;font-weight:600">MR 만들기 / diff 보기</a></p>` : ''}
+    ${r.request ? `<p style="margin:8px 0;color:#57606a"><b>요청:</b> ${esc(r.request)}</p>` : ''}
     <p style="margin:8px 0">${esc(r.summary || '결과 파일(result.json)이 없습니다. 아래 작업폴더의 claude.log 를 확인하세요.')}</p>
     ${r.failedStep ? `<p style="color:#cf222e"><b>실패 지점:</b> ${esc(r.failedStep)}</p>` : ''}`;
 
@@ -61,7 +62,7 @@ function buildMail(ticket, plan, r, dir) {
   const decisions = (r.decisions || []).map(d =>
     `<b>${esc(d.topic)}</b> → ${esc(d.choice)}<br><span style="font-size:12px;color:#57606a">근거: ${esc(d.reason)}${d.alternative ? ` / 대안: ${esc(d.alternative)}` : ''}</span>`);
 
-  const changes = (r.changes || []).map(c => `<code>${esc(c.file)}${c.lines ? ':' + esc(c.lines) : ''}</code> — ${esc(c.what)}`);
+  const changes = (r.changes || []).map(c => `<code>${esc(c.file)}${c.lines ? ':' + esc(c.lines) : ''}</code> — ${esc(c.what)}${c.why ? `<br><span style="font-size:12px;color:#57606a">왜: ${esc(c.why)}</span>` : ''}`);
 
   const requestText = plan.mode === 'new'
     ? (ticket.doc.request || '(이미지로 작성됨)')

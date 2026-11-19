@@ -736,28 +736,313 @@
   }
 
   // ---------- 상세 ----------
-  const listCard = (title, items) => (items.length ? `<section class="card"><h2>${title}</h2><ul>${items.map(i => `<li>${esc(i)}</li>`).join('')}</ul></section>` : '');
-  const fileCard = (title, f) => (f ? `<section class="card"><h2>${title}</h2>${f.truncated ? '<p class="desc mb8">길어서 뒷부분만 보여줘요.</p>' : ''}<pre class="log">${esc(f.text)}</pre></section>` : '');
   const arr = v => (Array.isArray(v) ? v : []);
-  const textCard = (title, v) => (v ? `<section class="card"><h2>${title}</h2><p>${esc(v)}</p></section>` : '');
 
-  // result.json — 예전에 메일로 보내던 내용을 그대로 보여준다
-  function resultCards(res, changedFiles) {
-    if (!res) return '';
-    const rows = (items, fn) => `<ul>${items.map(i => `<li>${fn(i)}</li>`).join('')}</ul>`;
-    const card = (title, items, fn) => (items.length ? `<section class="card"><h2>${title}</h2>${rows(items, fn)}</section>` : '');
-    const decisions = card('스스로 정한 것', arr(res.decisions), d => `<b>${esc(d.topic)}</b> — ${esc(d.choice)}<div class="desc">근거: ${esc(d.reason)}${d.alternative ? ` · 대안: ${esc(d.alternative)}` : ''}</div>`);
-    const changes = card('변경 내용', arr(res.changes), c => `<code>${esc(c.file)}${c.lines ? ':' + esc(c.lines) : ''}</code> ${esc(c.what)}`);
-    const files = card('바뀐 파일 (실행 전후 비교)', arr(changedFiles), f => `<code>${esc(f.file)}</code> ${esc(f.status)}${f.preModified ? ' <span class="desc">(실행 전부터 수정돼 있던 파일)</span>' : ''}`);
-    const db = arr(res.dbScripts).length ? `<section class="card"><h2>DB 적용 필요 쿼리</h2>${arr(res.dbScripts).map(s => `
-      <div class="mb8"><b>${esc(s.kind)}</b> · ${esc(s.target)} — ${esc(s.purpose)}<pre class="log">${esc(s.sql)}</pre><div class="desc">${esc(s.risk)}</div></div>`).join('')}</section>` : '';
-    return [
-      textCard('실패 단계', res.failedStep),
-      decisions, changes, files, db,
-      listCard('커밋 전 확인할 것', arr(res.reviewChecklist)),
-      listCard('커밋', arr(res.commits)),
-      textCard('E2E', res.e2e), textCard('코드리뷰', res.review), textCard('컴파일', res.compile),
-    ].join('');
+  // 요청서(request.md)에서 사람이 적은 요청 부분만 꺼낸다. 봇에게 주는 안내(> 줄)와 참고·첨부 절은 뺀다
+  function requestParts(text) {
+    if (!text) return [];
+    return text.split(/^## /m).slice(1).map(s => {
+      const nl = s.indexOf('\n');
+      const body = nl < 0 ? '' : s.slice(nl + 1);
+      return { head: (nl < 0 ? s : s.slice(0, nl)).trim(), body: body.split('\n').filter(l => !l.startsWith('>')).join('\n').trim() };
+    }).filter(p => /^(요청사항|이번에 반영할|이전 확인 요청)/.test(p.head) && p.body);
+  }
+
+  // 요청 요지: 봇이 적은 request → 요청서의 '요청 내용:' 줄 → 요청 본문 첫 줄
+  function requestGist(res, parts) {
+    if (res.request) return res.request;
+    const body = parts.map(p => p.body).join('\n');
+    const m = /요청\s*내용\s*[:：]\s*(.+)/.exec(body);
+    if (m) return m[1].trim();
+    const line = body.split('\n').map(l => l.replace(/^[-*·\s\d.)]+/, '').trim()).find(l => l.length > 10 && !/^-{3,}/.test(l));
+    return line || '';
+  }
+
+  // 문장 단위로 나눠 목록으로 보여주면 긴 문단보다 훨씬 읽기 쉽다
+  const sentences = s => String(s || '').split(/(?<=[.!?])\s+(?=\S)/).map(x => x.trim()).filter(Boolean);
+  function firstSentence(s) {
+    const first = sentences(s)[0] || '';
+    return first.length > 140 ? first.slice(0, 140) + '…' : first;
+  }
+  const bullets = s => {
+    const list = sentences(s);
+    return list.length > 1 ? `<ul class="rd-list">${list.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : `<p>${esc(s)}</p>`;
+  };
+
+  // E2E 글에서 통과·실패·건너뜀 수를 읽는다
+  function e2eCount(s) {
+    const n = re => { const m = re.exec(s || ''); return m ? Number(m[1]) : 0; };
+    const c = { passed: n(/(\d+)\s*passed/i), failed: n(/(\d+)\s*failed/i), skipped: n(/(\d+)\s*skipped/i) };
+    return c.passed + c.failed + c.skipped ? c : null;
+  }
+
+  // ---------- diff (GitLab 처럼 before/after) ----------
+  // unified diff → 파일 > 덩어리(hunk) > 줄. 줄마다 이전·이후 줄 번호를 붙인다
+  function parseDiff(text) {
+    const files = [];
+    let f = null, h = null, o = 0, n = 0;
+    String(text || '').split('\n').forEach(line => {
+      if (line.startsWith('diff --git ')) {
+        const m = / b\/(.+)$/.exec(line);
+        f = { path: m ? m[1] : line.slice(11), isNew: false, isDel: false, binary: false, hunks: [], add: 0, del: 0 };
+        files.push(f); h = null;
+        return;
+      }
+      if (!f) return;
+      if (!h) {
+        if (/^new file/.test(line)) f.isNew = true;
+        else if (/^deleted file/.test(line)) f.isDel = true;
+        else if (/^Binary files/.test(line)) f.binary = true;
+        else if (line.startsWith('+++ ') && !line.startsWith('+++ /dev/null')) f.path = line.slice(4).replace(/^b\//, '').replace(/\t.*$/, '');
+      }
+      const hm = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@ ?(.*)$/.exec(line);
+      if (hm) { o = Number(hm[1]); n = Number(hm[2]); h = { ctx: hm[3], lines: [] }; f.hunks.push(h); return; }
+      if (!h || line.startsWith('\\')) return;
+      const t = line[0];
+      if (t === '+') { h.lines.push({ t, text: line.slice(1), n: n++ }); f.add++; }
+      else if (t === '-') { h.lines.push({ t, text: line.slice(1), o: o++ }); f.del++; }
+      else if (t === ' ' || line === '') h.lines.push({ t: ' ', text: line.slice(1), o: o++, n: n++ });
+    });
+    return files;
+  }
+
+  // 짝이 맞는 삭제·추가 줄에서 바뀐 부분만 진하게 칠한다 (앞뒤 같은 글자를 뺀 가운데)
+  function wordDiff(a, b) {
+    let p = 0;
+    while (p < a.length && p < b.length && a[p] === b[p]) p++;
+    let s = 0;
+    while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+    const mark = (x) => {
+      const mid = x.slice(p, x.length - s);
+      if (!mid || mid.length === x.length) return esc(x);
+      return esc(x.slice(0, p)) + `<mark>${esc(mid)}</mark>` + esc(x.slice(x.length - s));
+    };
+    return [mark(a), mark(b)];
+  }
+
+  // 덩어리를 표의 행으로. split: 왼쪽 이전 / 오른쪽 이후, unified: 한 줄씩
+  function diffRows(hunks, mode) {
+    const out = [];
+    hunks.forEach(hk => {
+      out.push(`<tr class="hk"><td colspan="${mode === 'split' ? 4 : 3}">@@ ${esc(hk.ctx || '')}</td></tr>`);
+      const L = hk.lines;
+      for (let i = 0; i < L.length;) {
+        if (L[i].t === ' ') {
+          const x = L[i++];
+          out.push(mode === 'split'
+            ? `<tr><td class="ln">${x.o}</td><td class="cd">${esc(x.text)}</td><td class="ln">${x.n}</td><td class="cd">${esc(x.text)}</td></tr>`
+            : `<tr><td class="ln">${x.o}</td><td class="ln">${x.n}</td><td class="cd">${esc(x.text)}</td></tr>`);
+          continue;
+        }
+        const dels = [], adds = [];
+        while (i < L.length && L[i].t === '-') dels.push(L[i++]);
+        while (i < L.length && L[i].t === '+') adds.push(L[i++]);
+        const pairs = Math.max(dels.length, adds.length);
+        if (mode === 'split') {
+          for (let k = 0; k < pairs; k++) {
+            const d = dels[k], a = adds[k];
+            const [dt, at] = d && a ? wordDiff(d.text, a.text) : [d ? esc(d.text) : '', a ? esc(a.text) : ''];
+            out.push(`<tr>${d ? `<td class="ln del">${d.o}</td><td class="cd del">${dt}</td>` : '<td class="ln none"></td><td class="cd none"></td>'}${a ? `<td class="ln add">${a.n}</td><td class="cd add">${at}</td>` : '<td class="ln none"></td><td class="cd none"></td>'}</tr>`);
+          }
+        } else {
+          const marked = dels.map((d, k) => (adds[k] ? wordDiff(d.text, adds[k].text) : [esc(d.text)]));
+          dels.forEach((d, k) => out.push(`<tr><td class="ln del">${d.o}</td><td class="ln del"></td><td class="cd del">${marked[k][0]}</td></tr>`));
+          adds.forEach((a, k) => out.push(`<tr><td class="ln add"></td><td class="ln add">${a.n}</td><td class="cd add">${marked[k] ? marked[k][1] : esc(a.text)}</td></tr>`));
+        }
+      }
+    });
+    return out.join('');
+  }
+
+  const DIFF_BIG = 800; // 줄이 이보다 많은 파일은 접어서 시작한다
+  function diffTable(file, mode) {
+    if (file.binary) return '<p class="desc df-note">바이너리 파일이라 내용을 비교할 수 없어요.</p>';
+    if (!file.hunks.length) return '<p class="desc df-note">내용 변경 없이 이름이나 권한만 바뀌었어요.</p>';
+    return `<div class="df-scroll"><table class="dt ${mode}">${mode === 'split'
+      ? '<colgroup><col class="c-ln"><col><col class="c-ln"><col></colgroup>'
+      : '<colgroup><col class="c-ln"><col class="c-ln"><col></colgroup>'}<tbody>${diffRows(file.hunks, mode)}</tbody></table></div>`;
+  }
+
+  // 목차에서 지금 보고 있는 항목을 표시한다. 화면 위쪽 1/3 에 걸친 마지막 항목이 '지금 위치'
+  let tocObserver = null;
+  function watchToc() {
+    if (tocObserver) tocObserver.disconnect();
+    const toc = document.getElementById('rd-toc');
+    if (!toc) return;
+    const items = [...toc.querySelectorAll('[data-jump]')];
+    const targets = items.map(b => document.getElementById(b.dataset.jump)).filter(Boolean);
+    const visible = new Set();
+    const mark = () => {
+      const current = targets.filter(t => visible.has(t)).pop() || (scrollY < 40 ? targets[0] : null);
+      if (!current) return;
+      items.forEach(b => {
+        const on = b.dataset.jump === current.id;
+        if (on) b.setAttribute('aria-current', 'true'); else b.removeAttribute('aria-current');
+        if (on) { const box = toc.querySelector('.rd-toc-in'); box.scrollTo({ left: b.offsetLeft - box.clientWidth / 2 + b.offsetWidth / 2, behavior: 'smooth' }); }
+      });
+    };
+    tocObserver = new IntersectionObserver(entries => {
+      entries.forEach(e => { if (e.isIntersecting) visible.add(e.target); else visible.delete(e.target); });
+      mark();
+    }, { rootMargin: '-150px 0px -65% 0px' });
+    targets.forEach(t => tocObserver.observe(t));
+  }
+
+  let diffUnits = []; // 지금 상세 화면의 파일 목록. 비교 방식을 바꿀 때 표만 다시 그린다
+  let diffMode = 'split';
+  try { diffMode = localStorage.getItem('pigon-diff-mode') || (innerWidth < 1000 ? 'unified' : 'split'); } catch (e) { /* 저장소를 못 쓰면 기본값 */ }
+
+  // 실행 상세: 한눈에 보기 → 요청 → 코드 변경과 이유 → 판단 → 확인 → 남은 일
+  function detailCards(r) {
+    const res = r.result || {};
+    const norm = f => String(f || '').replace(/\\/g, '/').replace(/^\.\//, '');
+    const same = (a, b) => { a = norm(a); b = norm(b); return a === b || a.endsWith('/' + b) || b.endsWith('/' + a); };
+    const base = f => norm(f).split('/').pop();
+    const dirOf = f => { const p = norm(f); return p.slice(0, p.length - base(p).length).replace(/\/$/, ''); };
+    const ul = items => `<ul class="rd-list">${items.map(i => `<li>${i}</li>`).join('')}</ul>`;
+    const section = (id, title, sub, body) => `<section class="card rd" id="${id}"><h2>${title}${sub ? ` <span class="desc">${sub}</span>` : ''}</h2>${body}</section>`;
+
+    const questions = arr(res.questions).length ? arr(res.questions) : arr(r.questions);
+    const parts = requestParts(r.request && r.request.text);
+    const gist = requestGist(res, parts);
+    const summary = res.summary || r.summary;
+    const changes = arr(res.changes);
+    const changed = arr(r.changedFiles);
+    const decisionsList = arr(res.decisions);
+    const e2e = e2eCount(res.e2e);
+    const db = arr(res.dbScripts);
+
+    // 파일 단위로 묶는다: diff(이전/이후) + 봇이 적은 무엇을·왜 + 확인할 점
+    const diffFiles = r.diff && r.diff.text ? parseDiff(r.diff.text) : [];
+    const units = diffFiles.map(df => ({ path: df.path, df, c: changes.find(c => same(c.file, df.path)) }));
+    changes.filter(c => !units.some(u => u.c === c)).forEach(c => units.push({ path: c.file, c }));
+    changed.filter(f => !units.some(u => same(u.path, f.file))).forEach(f => units.push({ path: f.file }));
+    units.forEach(u => { u.f = changed.find(x => same(x.file, u.path)); });
+    const fileCount = units.length;
+
+    // 확인 항목에 파일 이름이 들어 있으면 그 파일 옆으로 보낸다
+    const checklist = arr(res.reviewChecklist).map(t => ({ text: String(t), used: false }));
+    const oldFormat = changes.length && !changes.some(c => c.why);
+    const fileBlocks = units.map((u, k) => {
+      const checks = checklist.filter(x => !x.used && base(u.path) && x.text.includes(base(u.path)));
+      checks.forEach(x => { x.used = true; });
+      const badges = [
+        u.df && u.df.isNew && '<span class="df-badge add">새 파일</span>',
+        u.df && u.df.isDel && '<span class="df-badge del">삭제</span>',
+        u.f && u.f.preModified && '<span class="df-badge warn" title="실행 전부터 수정돼 있던 파일이라 그 수정도 함께 보여요">실행 전부터 수정됨</span>',
+      ].filter(Boolean).join('');
+      const size = u.df ? u.df.hunks.reduce((a, h) => a + h.lines.length, 0) : 0;
+      const explain = u.c ? `<div class="df-why">
+          <div class="df-row"><b>${oldFormat ? '바꾼 내용' : '무엇을'}</b><span>${esc(u.c.what)}</span></div>
+          ${u.c.why ? `<div class="df-row why"><b>왜</b><span>${esc(u.c.why)}</span></div>` : ''}
+          ${checks.length ? `<div class="df-row check"><b>확인할 점</b><span>${checks.length > 1 ? ul(checks.map(x => esc(x.text))) : esc(checks[0].text)}</span></div>` : ''}
+        </div>`
+        : `<div class="df-why none"><span class="desc">봇이 이 파일에 대한 설명을 남기지 않았어요.</span>${checks.length ? `<div class="df-row check"><b>확인할 점</b><span>${ul(checks.map(x => esc(x.text)))}</span></div>` : ''}</div>`;
+      return `<details class="df" id="df-${k}" ${size > DIFF_BIG ? '' : 'open'}>
+        <summary class="df-head">
+          <span class="df-name">${esc(base(u.path))}</span>
+          <span class="df-dir" title="${esc(norm(u.path))}">${esc(dirOf(u.path))}</span>
+          ${badges}
+          ${u.df ? `<span class="df-stat"><b class="p">+${u.df.add}</b><b class="m">−${u.df.del}</b></span>` : ''}
+        </summary>
+        ${explain}
+        ${u.df ? `<div class="df-body" data-df="${k}">${diffTable(u.df, diffMode)}</div>` : ''}
+      </details>`;
+    });
+    diffUnits = units;
+    const leftChecks = checklist.filter(k => !k.used).map(k => esc(k.text));
+    const notes = (arr(res.notes).length ? arr(res.notes) : arr(r.notes)).filter(n => !/:\s*없음\s*(\(.*\))?\s*$/.test(n)).map(esc);
+    const leftCount = leftChecks.length + notes.length;
+    const verifyItems = [['컴파일', res.compile], ['E2E', res.e2e], ['코드리뷰', res.review]].filter(([, v]) => v);
+
+    // 한눈에 보기: 요청 한 줄, 한 일, 결과 숫자
+    const chips = [
+      questions.length && `<span class="rd-chip warn">답이 필요해요 ${questions.length}</span>`,
+      fileCount && `<span class="rd-chip">파일 ${fileCount}개</span>`,
+      e2e && `<span class="rd-chip ${e2e.failed ? 'bad' : 'good'}">E2E ${[e2e.passed && `${e2e.passed} 통과`, e2e.failed && `${e2e.failed} 실패`, e2e.skipped && `${e2e.skipped} 건너뜀`].filter(Boolean).join(' · ')}</span>`,
+      db.length && `<span class="rd-chip warn">DB 쿼리 ${db.length}</span>`,
+      leftCount && `<span class="rd-chip">남은 일 ${leftCount}</span>`,
+    ].filter(Boolean);
+    const overview = `<section class="card rd" id="rd-top"><h2>한눈에 보기</h2>
+      <dl class="rd-sum">
+        ${gist ? `<dt>요청</dt><dd>${esc(gist)}</dd>` : ''}
+        <dt>한 일</dt><dd>${summary ? bullets(summary) : '<p class="desc">결과 요약이 없어요. 아래 진행 로그를 확인해 주세요.</p>'}</dd>
+        ${res.failedStep ? `<dt>멈춘 곳</dt><dd class="bad-text">${esc(res.failedStep)}</dd>` : ''}
+        ${chips.length ? `<dt>결과</dt><dd><div class="rd-chips">${chips.join('')}</div></dd>` : ''}
+      </dl>
+    </section>`;
+
+    // 목차: 화면 위에 붙어 다니며, 어디까지 내려왔든 바로 이동한다
+    const jumps = [
+      ['rd-head', '맨 위'],
+      ['rd-top', '한눈에 보기'],
+      questions.length && ['rd-ask', '답이 필요해요'],
+      fileCount && ['rd-code', `코드 변경 ${fileCount}`],
+      decisionsList.length && ['rd-why', `판단 ${decisionsList.length}`],
+      db.length && ['rd-db', 'DB 쿼리'],
+      verifyItems.length && ['rd-verify', '확인'],
+      (r.shots || []).length && ['rd-shots', '스크린샷'],
+      leftCount && ['rd-left', `남은 일 ${leftCount}`],
+      (parts.length || r.request) && ['rd-request', '요청 원문'],
+      r.log && ['rd-log', '진행 로그'],
+    ].filter(Boolean);
+    const nav = `<nav class="rd-toc" id="rd-toc" aria-label="목차"><div class="rd-toc-in">${jumps.map(([id, l]) => `<button class="rd-toc-item" data-jump="${id}">${l}</button>`).join('')}</div></nav>`;
+
+    const ask = questions.length ? `<section class="card rd attention" id="rd-ask"><h2>답이 필요해요</h2>${ul(questions.map(esc))}</section>` : '';
+
+    const original = parts.map(p => `${parts.length > 1 ? `<div class="opt-title">${esc(p.head)}</div>` : ''}<div class="req-text">${esc(p.body)}</div>`).join('');
+    const request = parts.length || r.request ? section('rd-request', '요청 원문', '', `
+      ${original ? `<details class="fold" ${gist ? '' : 'open'}><summary>요청서에 적힌 내용</summary>${original}</details>` : ''}
+      ${r.request ? `<details class="fold"><summary>요청서 파일 전체 (봇에게 준 안내 포함)</summary>${r.request.truncated ? '<p class="desc">길어서 뒷부분만 보여줘요.</p>' : ''}<pre class="log">${esc(r.request.text)}</pre></details>` : ''}`) : '';
+
+    const d = r.diff || {};
+    const scope = d.error ? `<div class="notice">${esc(d.error)}</div>`
+      : !diffFiles.length ? ''
+      : `<p class="desc">${d.rebuilt ? '예전 실행이라 브랜치 전체 변경(main 기준)을 git에서 다시 만들어 보여줘요.' : d.base ? `비교 기준 <code>${esc(d.base)}</code>` : 'SVN 작업본 기준이에요(커밋 전).'}${d.truncated ? ' 너무 길어서 앞부분만 보여줘요.' : ''}</p>`;
+    const totalAdd = diffFiles.reduce((a, f) => a + f.add, 0), totalDel = diffFiles.reduce((a, f) => a + f.del, 0);
+    const toc = fileCount > 1 ? `<div class="df-toc">${units.map((u, k) => `<button class="df-toc-item" data-jump="df-${k}"><span>${esc(base(u.path))}</span>${u.df ? `<span class="df-stat"><b class="p">+${u.df.add}</b><b class="m">−${u.df.del}</b></span>` : ''}</button>`).join('')}</div>` : '';
+    const tools = diffFiles.length ? `<div class="df-tools">
+        <span class="df-stat big"><b class="p">+${totalAdd}</b><b class="m">−${totalDel}</b></span>
+        <div class="seg" role="group" aria-label="비교 방식">
+          <button class="chip ${diffMode === 'split' ? 'on' : ''}" data-diffmode="split" aria-pressed="${diffMode === 'split'}">나란히</button>
+          <button class="chip ${diffMode === 'unified' ? 'on' : ''}" data-diffmode="unified" aria-pressed="${diffMode === 'unified'}">한 줄로</button>
+        </div>
+      </div>` : '';
+    const code = fileCount ? section('rd-code', '코드 변경과 이유', `${fileCount}개 파일`, `
+      ${tools}
+      ${scope}
+      ${toc}
+      ${oldFormat ? '<p class="desc rd-hint">이 실행은 파일별 이유를 따로 적기 전 형식이라, 바꾼 내용 안에 이유가 섞여 있어요.</p>' : ''}
+      ${fileBlocks.join('')}
+      ${res.contract ? `<details class="fold"><summary>주고받는 값(계약)</summary>${bullets(res.contract)}</details>` : ''}
+      ${arr(res.commits).length ? `<details class="fold"><summary>커밋 ${arr(res.commits).length}개</summary>${ul(arr(res.commits).map(c => `<code>${esc(c)}</code>`))}</details>` : ''}`) : '';
+
+    const decisions = decisionsList.length ? section('rd-why', '이렇게 정한 이유', '요청서만으로 정해지지 않아 봇이 고른 것', decisionsList.map(d => `
+      <article class="why">
+        <div class="why-topic">${esc(d.topic)}</div>
+        ${bullets(d.choice)}
+        ${d.reason || d.alternative ? `<details class="fold"><summary>근거${d.alternative ? '와 다른 방법' : ''}</summary>
+          ${d.reason ? `<div class="why-sub"><b>근거</b>${bullets(d.reason)}</div>` : ''}
+          ${d.alternative ? `<div class="why-sub"><b>다른 방법</b>${bullets(d.alternative)}</div>` : ''}
+        </details>` : ''}
+      </article>`).join('')) : '';
+
+    const dbCard = db.length ? section('rd-db', 'DB 적용 필요 쿼리', '', db.map(s => `
+      <div class="mb8"><b>${esc(s.kind)}</b> · ${esc(s.target)} — ${esc(s.purpose)}<pre class="log">${esc(s.sql)}</pre><div class="desc">${esc(s.risk)}</div></div>`).join('')) : '';
+
+    const verify = verifyItems.length ? section('rd-verify', '어떻게 확인했나', '', verifyItems.map(([l, v]) => {
+      const list = sentences(v);
+      return `<article class="vf"><div class="vf-label">${l}</div><div class="vf-body">
+        <p>${esc(firstSentence(v))}</p>
+        ${list.length > 1 ? `<details class="fold"><summary>자세히</summary>${ul(list.slice(1).map(esc))}</details>` : ''}
+      </div></article>`;
+    }).join('')) : '';
+
+    const left = leftCount ? section('rd-left', '남은 일과 참고', '', `
+      ${leftChecks.length ? `<div class="opt-title">커밋 전에 확인할 것</div>${ul(leftChecks)}` : ''}
+      ${notes.length ? `<div class="opt-title ${leftChecks.length ? 'mt16' : ''}">참고</div>${ul(notes)}` : ''}`) : '';
+
+    return { overview, nav, ask, request, code, decisions, db: dbCard, verify, left };
   }
 
   // 최종 커밋: 봇이 git 에서 읽어 둔 headCommit, 없으면(예전 실행) Claude 가 적은 commits 마지막 줄 앞의 해시
@@ -826,10 +1111,11 @@
     try {
       const r = await api('GET', `/api/runs/${id}`);
       if (g !== gen) return;
-      const mr = /^https?:\/\//.test(r.mr) ? `<section class="card"><h2>MR 만들기</h2><a class="btn soft link" href="${esc(r.mr)}" target="_blank" rel="noopener noreferrer">GitLab에서 열기</a></section>` : '';
+      const c = detailCards(r);
+      const mr = /^https?:\/\//.test(r.mr) ? `<a class="btn soft small link rd-mr" href="${esc(r.mr)}" target="_blank" rel="noopener noreferrer">GitLab에서 MR 만들기</a>` : '';
       view.innerHTML = `
         <a class="back" href="#/runs">${ICON_BACK}내역</a>
-        <section class="card">
+        <section class="card rd" id="rd-head">
           ${badge(r.status)}
           <div class="detail-title">${esc(r.title)}</div>
           <div class="desc">${esc(r.ticket)} · ${esc(modeText(r.mode))}</div>
@@ -837,17 +1123,51 @@
             ${r.start ? `<span class="pill-label">시작 ${esc(when(r.start))}</span>` : ''}
             <span class="pill-label">${r.start ? '종료' : '기록'} ${esc(when(r.time))}</span>
             ${durText(durMs(r)) ? `<span class="pill-label">${esc(durText(durMs(r)))} 걸림</span>` : ''}
-            ${headCommit(r.result) ? `<span class="pill-label mono" title="${esc(headCommit(r.result))}">커밋 ${esc(headCommit(r.result).slice(0, 8))}</span>` : ''}
+            ${headCommit(r.result) ? (arr(r.commitIds).length
+              ? `<button class="pill-label mono pill-btn" id="copy-commits" title="이 실행에서 만든 커밋 ${arr(r.commitIds).length}개의 전체 아이디를 복사해요&#10;${esc(arr(r.commitIds).join('\n'))}">커밋 ${esc(headCommit(r.result).slice(0, 8))}${arr(r.commitIds).length > 1 ? ` 외 ${arr(r.commitIds).length - 1}개` : ''}<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg></button>`
+              : `<span class="pill-label mono" title="${esc(headCommit(r.result))}">커밋 ${esc(headCommit(r.result).slice(0, 8))}</span>`) : ''}
           </div>
+          ${mr}
         </section>
-        <section class="card"><h2>요약</h2><p>${esc(r.summary || '요약이 없어요')}</p></section>
-        ${listCard('답이 필요한 질문', r.questions)}
-        ${mr}
-        ${shotCards(r.id, r.shots || [])}
-        ${resultCards(r.result, r.changedFiles)}
-        ${listCard('메모', r.notes)}
-        ${r.hasFolder ? fileCard('요청서', r.request) + fileCard('진행 로그', r.log)
+        ${c.nav}
+        ${c.overview}
+        ${c.ask}
+        ${c.code}
+        ${c.decisions}
+        ${c.db}
+        ${c.verify}
+        ${shotCards(r.id, r.shots || []).replace('<section class="card">', '<section class="card rd" id="rd-shots">')}
+        ${c.left}
+        ${c.request}
+        ${r.hasFolder ? (r.log ? `<section class="card rd" id="rd-log"><details class="fold"><summary>진행 로그 보기</summary>${r.log.truncated ? '<p class="desc">길어서 뒷부분만 보여줘요.</p>' : ''}<pre class="log">${esc(r.log.text)}</pre></details></section>` : '')
           : '<section class="card"><p class="desc">작업폴더가 정리돼서 요청서와 진행 로그는 볼 수 없어요.</p></section>'}`;
+      // 바로가기: 주소(#)는 라우터가 쓰므로 링크 대신 버튼으로 스크롤한다
+      view.querySelectorAll('[data-jump]').forEach(b => {
+        b.onclick = () => {
+          const t = document.getElementById(b.dataset.jump);
+          if (!t) return;
+          if (t.tagName === 'DETAILS') t.open = true;
+          if (b.dataset.jump === 'rd-log') { const d = t.querySelector('details'); if (d) d.open = true; }
+          t.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+        };
+      });
+      watchToc();
+      const copyBtn = document.getElementById('copy-commits');
+      if (copyBtn) copyBtn.onclick = async () => {
+        const ids = arr(r.commitIds);
+        try {
+          await navigator.clipboard.writeText(ids.join('\n'));
+          toast(`커밋 아이디 ${ids.length}개를 복사했어요`);
+        } catch (e) { toast('복사하지 못했어요. 버튼에 마우스를 올리면 아이디가 보여요'); }
+      };
+      view.querySelectorAll('[data-diffmode]').forEach(b => {
+        b.onclick = () => {
+          diffMode = b.dataset.diffmode;
+          try { localStorage.setItem('pigon-diff-mode', diffMode); } catch (e) { /* 저장 못 해도 이번 화면에는 적용 */ }
+          view.querySelectorAll('[data-diffmode]').forEach(x => { const on = x.dataset.diffmode === diffMode; x.classList.toggle('on', on); x.setAttribute('aria-pressed', on); });
+          view.querySelectorAll('[data-df]').forEach(el => { const u = diffUnits[Number(el.dataset.df)]; if (u && u.df) el.innerHTML = diffTable(u.df, diffMode); });
+        };
+      });
       playEnter();
     } catch (e) {
       if (g !== gen) return;
@@ -1440,7 +1760,8 @@
     document.querySelectorAll('#tabs a[data-tab]').forEach(a => {
       if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     });
-    view.classList.toggle('narrow', tab === 'settings' || tab === 'harness' || !!m);
+    view.classList.toggle('narrow', tab === 'settings' || tab === 'harness');
+    view.classList.toggle('detail', !!m); // 실행 상세는 diff 를 나란히 보여야 해서 조금 넓게
     window.scrollTo(0, 0);
     pendingEnter = true;
     if (m) detail(m[1]);

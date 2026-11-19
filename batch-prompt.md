@@ -57,7 +57,7 @@
 ## 5. 마무리
 - 끝에 `svn status` 와 `svn diff` 로 내가 바꾼 부분을 다시 확인한다.
 - blocked/failed 로 끝날 때 이미 고친 파일이 있으면 되돌리지 말고 그대로 두고, 그 파일 목록을 `notes` 에 적는다.
-- 바뀐 파일 목록은 봇이 실행 전후를 비교해 메일에 자동으로 넣는다. `changes` 에는 파일별로 무엇을 바꿨는지만 적으면 된다.
+- 바뀐 파일 목록은 봇이 실행 전후를 비교해 메일에 자동으로 넣는다. `changes` 에는 파일별로 무엇을·왜 바꿨는지 적는다.
 
 ## 6. 결과 파일
 성공·실패 무관하게 결과 파일 경로에 Write 로 JSON 을 만든다.
@@ -65,10 +65,11 @@
 ```json
 {
   "status": "modified | blocked | failed",
+  "request": "요청을 어떻게 이해했는지 1~2문장 (무엇이 문제이고 무엇을 원하는지. 요청서를 옮겨 적지 말고 요지만)",
   "summary": "무엇을 했는지 3줄 이내",
   "failedStep": "failed 일 때 어느 단계에서 왜 (그 외 빈 문자열)",
   "projects": ["수정한 프로젝트명"],
-  "changes": [{ "file": "프로젝트명/src/... 경로", "lines": "10-20", "what": "무엇을 바꿨는지" }],
+  "changes": [{ "file": "프로젝트명/src/... 경로", "lines": "10-20", "what": "무엇을 바꿨나 한 줄", "why": "왜 바꿨나 한 줄 (요청서 몇 항·어떤 원인 때문인지, 기존 코드 path:line 등)" }],
   "dbScripts": [{ "kind": "DDL | DML | 확인", "target": "DB/테이블", "purpose": "목적", "sql": "SQL 전문", "risk": "주의점" }],
   "decisions": [{ "topic": "판단 주제", "choice": "선택", "reason": "근거", "alternative": "대안" }],
   "compile": "컴파일 결과 요약",

@@ -502,6 +502,43 @@ function describeEvent(ev, agents) {
   return out;
 }
 
+// 관리 웹 '코드 변경과 이유'에서 GitLab 처럼 before/after 를 보여주려고 실행 폴더에 code.diff 를 남긴다.
+// 인코딩이 섞인 파일(EUC-KR JSP 등)이 있어 바이트 그대로 저장하고, 읽는 쪽(관리 웹)에서 줄마다 해석한다.
+function saveGitDiff(headBefore, head, dir, tag) {
+  const range = headBefore && headBefore !== head ? `${headBefore}..${head}` : `origin/main...${head}`;
+  try {
+    fs.writeFileSync(path.join(dir, 'code.diff'), execFileSync('git', ['diff', '--no-color', '--no-ext-diff', '-U4', range], { cwd: CONFIG.projectDir, maxBuffer: 50 * 1024 * 1024, windowsHide: true }));
+  } catch (e) { log(`${tag}: code.diff 생성 실패 ${e.message}`); }
+  return range;
+}
+
+// SVN 은 커밋하지 않으므로 지금 작업본 기준 diff. 실행 전부터 수정돼 있던 파일은 그 수정도 함께 나온다(관리 웹에 표시).
+function saveSvnDiff(dirs, files, dir, tag) {
+  const out = [];
+  dirs.forEach(d => {
+    const name = path.basename(d);
+    files.filter(f => f.file.startsWith(name + '/')).forEach(f => {
+      const rel = f.file.slice(name.length + 1);
+      try {
+        if (f.status.startsWith('신규')) {
+          const abs = path.join(d, rel);
+          if (!fs.statSync(abs).isFile()) return;
+          const lines = fs.readFileSync(abs).toString('latin1').replace(/\r?\n$/, '').split(/\r?\n/);
+          out.push(Buffer.from(`diff --git a/${f.file} b/${f.file}\nnew file\n--- /dev/null\n+++ b/${f.file}\n@@ -0,0 +1,${lines.length} @@\n`, 'utf8'));
+          out.push(Buffer.from(lines.map(l => '+' + l).join('\n') + '\n', 'latin1'));
+        } else {
+          const diff = execFileSync('svn', ['diff', '--internal-diff', '-x', '-U4', rel], { cwd: d, maxBuffer: 50 * 1024 * 1024, windowsHide: true }).toString('latin1');
+          // svn 은 'Index: 경로' 머리말을 쓴다. 관리 웹이 같은 방식으로 읽도록 git 형식 머리말로 바꾼다
+          const text = diff.replace(/^Index: .*\r?\n=+\r?\n/m, `diff --git a/${f.file} b/${f.file}\n`)
+            .replace(/^--- .*$/m, `--- a/${f.file}`).replace(/^\+\+\+ .*$/m, `+++ b/${f.file}`);
+          out.push(Buffer.from(text, 'latin1'));
+        }
+      } catch (e) { log(`${tag}: svn diff 실패 ${f.file} ${e.message}`); }
+    });
+  });
+  if (out.length) fs.writeFileSync(path.join(dir, 'code.diff'), Buffer.concat(out));
+}
+
 // 티켓 브랜치 최신 커밋 (push 직후라 origin/<브랜치> 가 맞다. 없으면 로컬 브랜치)
 function branchHead(branch) {
   for (const ref of [`origin/${branch}`, branch]) {
@@ -621,6 +658,7 @@ async function processTicket(no, threadName, token, state, rows, opts = {}) {
 
   if (isBatch) log(`${tag}: 서브에이전트 준비 ${syncAgents('batch', CONFIG.batch.projectDirs[0]).join(', ') || '(없음)'}`);
   const before = isBatch ? svnSnapshot(CONFIG.batch.projectDirs) : null;
+  const headBefore = isBatch ? '' : branchHead(ticket.releaseId); // 추가요청 반영이면 이번 실행분만 diff 로 남기기 위한 기준
   const startedAt = Date.now();
   const dir = path.join(RUN_DIR, ticket.releaseId, `${stamp()}-${plan.mode}`);
   fs.mkdirSync(dir, { recursive: true });
@@ -636,6 +674,7 @@ async function processTicket(no, threadName, token, state, rows, opts = {}) {
     const files = changedSince(before, svnSnapshot(CONFIG.batch.projectDirs));
     fs.writeFileSync(path.join(dir, 'changed-files.json'), JSON.stringify(files, null, 2));
     result.result = Object.assign(result.result || {}, { batchFiles: files });
+    saveSvnDiff(CONFIG.batch.projectDirs, files, dir, tag);
   }
 
   if (!isBatch) {
@@ -649,6 +688,7 @@ async function processTicket(no, threadName, token, state, rows, opts = {}) {
     const head = branchHead(ticket.releaseId);
     if (head) {
       result.result.headCommit = head;
+      result.result.diffBase = saveGitDiff(headBefore, head, dir, tag);
       try { fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify(result.result, null, 2)); } catch (e) { log(`${tag}: result.json 커밋 기록 실패 ${e.message}`); }
     }
   }
@@ -782,6 +822,7 @@ async function runMobile(ticket, tag, tState, threadName, token, state) {
   const files = changedSince(before, svnSnapshot(dirs));
   fs.writeFileSync(path.join(dir, 'changed-files.json'), JSON.stringify(files, null, 2));
   const r = Object.assign(result.result || {}, { batchFiles: files });
+  saveSvnDiff(dirs, files, dir, tag);
   const status = r.status || 'no-result';
   writeSummary(ticket, { mode: 'mobile' }, r, dir, startedAt);
   log(`${tag}: 모바일 claude 종료코드 ${result.code}, 결과 ${status}`);

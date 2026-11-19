@@ -177,6 +177,62 @@ function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return null; }
 }
 
+// 코드 변경 diff: 봇이 실행 폴더에 남긴 code.diff. 없으면(예전 실행) 티켓 브랜치 최종 커밋으로 git 에서 다시 만든다
+const DIFF_MAX = 4 * 1024 * 1024;
+const UTF8 = new TextDecoder('utf-8', { fatal: true });
+const EUCKR = new TextDecoder('euc-kr');
+function decodeDiff(buf) {
+  // 줄마다 UTF-8 로 읽고, 깨지면 EUC-KR 로 다시 읽는다 (JSP·SQL 일부가 EUC-KR 이라 한 diff 안에 섞인다)
+  const out = [];
+  let s = 0;
+  for (let i = 0; i <= buf.length; i++) {
+    if (i < buf.length && buf[i] !== 10) continue;
+    const line = buf.subarray(s, i);
+    let t;
+    try { t = UTF8.decode(line); } catch (e) { t = EUCKR.decode(line); }
+    out.push(t.replace(/\r$/, ''));
+    s = i + 1;
+  }
+  return out.join('\n');
+}
+// 이 실행에서 만든 커밋의 전체 아이디(오래된 것부터). 봇이 적은 commits 의 짧은 해시를 git 으로 풀고,
+// 없으면 diff 범위(이전 브랜치 끝..최종 커밋)의 커밋 목록을 쓴다
+const gitOut = (args, cwd) => new Promise((resolve, reject) =>
+  execFile('git', args, { cwd, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, windowsHide: true }, (e, out) => (e ? reject(e) : resolve(out))));
+async function runCommits(result) {
+  if (!result || !/^[0-9a-f]{40}$/.test(result.headCommit || '')) return [];
+  const cwd = (readJson(path.join(ROOT, 'config.json')) || {}).projectDir;
+  const ids = [];
+  for (const c of Array.isArray(result.commits) ? result.commits : []) {
+    const m = /^\s*`?([0-9a-f]{7,40})\b/i.exec(String(c));
+    if (!m) continue;
+    try { ids.push((await gitOut(['rev-parse', '--verify', '--quiet', `${m[1]}^{commit}`], cwd)).trim()); } catch (e) { /* 지워진 커밋은 건너뛴다 */ }
+  }
+  if (ids.length) return [...new Set(ids)];
+  const range = String(result.diffBase || `origin/main...${result.headCommit}`).replace('...', '..');
+  if (!/^[\w./-]+\.\.[0-9a-f]{40}$/.test(range)) return [result.headCommit];
+  try { return (await gitOut(['rev-list', '--reverse', range], cwd)).split(/\s+/).filter(Boolean); } catch (e) { return [result.headCommit]; }
+}
+
+async function runDiff(folder, result) {
+  const file = path.join(folder, 'code.diff');
+  let buf = null;
+  let base = (result && result.diffBase) || '';
+  const saved = fs.existsSync(file);
+  if (saved) buf = fs.readFileSync(file);
+  else if (result && /^[0-9a-f]{40}$/.test(result.headCommit || '')) {
+    const config = readJson(path.join(ROOT, 'config.json')) || {};
+    base = `origin/main...${result.headCommit}`;
+    try {
+      buf = await new Promise((resolve, reject) => execFile('git', ['diff', '--no-color', '--no-ext-diff', '-U4', base],
+        { cwd: config.projectDir, encoding: 'buffer', maxBuffer: 50 * 1024 * 1024, windowsHide: true }, (e, out) => (e ? reject(e) : resolve(out))));
+    } catch (e) { return { error: `git 에서 diff 를 만들지 못했어요. ${String(e.message).split('\n')[0]}` }; }
+  }
+  if (!buf || !buf.length) return null;
+  const truncated = buf.length > DIFF_MAX;
+  return { text: decodeDiff(truncated ? buf.subarray(0, DIFF_MAX) : buf), base, truncated, rebuilt: !saved };
+}
+
 // 봇이 작업폴더 screenshots/ 에 보관한 E2E 스크린샷. *_before / *_after 를 같은 장면으로 묶는다.
 const SHOT_NAME = /^[\w.-]{1,120}\.(png|jpe?g)$/i;
 function listShots(folder) {
@@ -390,6 +446,8 @@ async function route(req, res) {
       detail.result = readJson(path.join(folder, 'result.json'));
       detail.changedFiles = readJson(path.join(folder, 'changed-files.json'));
       detail.shots = listShots(folder);
+      detail.diff = await runDiff(folder, detail.result);
+      detail.commitIds = await runCommits(detail.result);
     }
     return send(res, 200, detail);
   }
